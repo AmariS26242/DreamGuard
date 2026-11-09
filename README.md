@@ -241,6 +241,7 @@ adb shell am start -n com.dreamguard.app/.MainActivity
 - 环境：Windows、JDK 17.0.21（Microsoft build）、Gradle 8.11.1、Android SDK 35 / Build-Tools 35.0.0、NDK 27.0.12077973、CMake 3.22.1。
 - `.\gradlew.bat --no-daemon clean testDebugUnitTest`：`BUILD SUCCESSFUL`，JUnit 共 **10 个用例全部通过**（`AudioSettingsTest` 3/3、`PlaybackControllerTest` 7/7）。
 - `.\gradlew.bat --no-daemon assembleDebug`：`BUILD SUCCESSFUL`，生成 `app/build/outputs/apk/debug/app-debug.apk`；C++20/CMake 为 arm64-v8a、armeabi-v7a、x86_64 三套 ABI 编译并打包。
+- GitHub Actions `Android CI`：运行 [42613031269](https://github.com/AmariS26242/DreamGuard/actions/runs/42613031269) 已成功完成，包含同样的单测、Debug APK 构建和构件上传步骤。
 - JVM 单元测试在本地 JVM 执行，不涉及真机或模拟器；原生库只验证了编译与打包，未在设备上实际加载。
 
 ### 明确未验证
@@ -251,7 +252,7 @@ adb shell am start -n com.dreamguard.app/.MainActivity
 - [ ] 未验证锁屏/后台播放行为。
 - [ ] 未验证 x86_64 模拟器运行。
 - [ ] 未验证 release 构建、混淆、签名。
-- [ ] 未在 GitHub 上实际触发 CI（工作流文件已写好，但本次没有 push，也没有创建仓库）。
+- [x] GitHub Actions 已触发并通过；后续代码变更仍需关注 Actions 结果。
 - [ ] 未做 instrumented / UI 自动化测试。
 
 ## 风险与限制
