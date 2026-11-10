@@ -190,7 +190,9 @@ Compose UI → PlaybackService（媒体会话、前台服务、共享音频焦�
 同格式 flush 只 reset；`reset`/`close` 释放句柄（`close` 在 `player.release()` 后调用，并终止处理）。
 第二十三轮主代理实测：`--offline :app:testDebugUnitTest :app:assembleDebug` 成功、**80 JVM tests / 0 failures /
 0 skipped**、Debug 三 ABI 编译通过；API 35 x86_64 模拟器 `dg_pcm16_processor` **206/0**、compressor **348/0**。
-但**未运行 APK 播放**，JVM fake 后端不等于实测 JNI/音频输出；第二十轮模拟器 68/0/0 与第二十一轮 iQOO Z9T
+**第二十四轮**同一模拟器安装当前 Debug APK，选 40 s/44.1 kHz/mono PCM16 WAV，UI 播放中并显示“本地压缩就绪”，
+开关 `checked=true`，MediaSession `PLAYING`、进程存活、无 FATAL/UnsatisfiedLinkError。
+但 JVM fake 后端与“就绪”状态**不等于**实测 JNI/音频输出；第二十轮模拟器 68/0/0 与第二十一轮 iQOO Z9T
 真机“正常”对应**旧 Kotlin −6 dB 链路**，不能当作 native 压缩器已运行/已听感验证。
 详见 `docs/STATUS.md` 的 DG-020/DG-022。
 
@@ -371,6 +373,17 @@ adb shell am start -n com.dreamguard.app/.MainActivity
 
 ## 验证状态
 
+### 2026-11-10 第二十四轮：API 35 x86_64 模拟器安装当前 Debug APK（播放状态 / 本地压缩就绪）
+
+- 代码已提交并推送 `4b7ace322da31f06417f3dc09a591795ba14207f`（短 `4b7ace3`）；本次日志/状态更新未提交。
+- 主代理在 API 35 x86_64 模拟器安装并启动当前 Debug APK；系统文件选择器选择合成 **40 s / 44.1 kHz /
+  单声道 PCM16 WAV**；UI 显示播放中，格式提示“本地压缩就绪”，打开处理开关后 `checked=true`。
+- `MediaSession` 为 `PLAYING`；进程存活；`AndroidRuntime:E` 日志未见 `FATAL EXCEPTION` / `UnsatisfiedLinkError`。
+- **能证明**：应用可安装/启动/选择本地 PCM16 文件并进入播放状态；“本地压缩就绪”（`NativeState.READY`）
+  说明 native 库加载与句柄创建路径未报错。
+- **不能证明**：逐块 `nativeProcess` 调用/JNI 返回值正确、实际音频输出电平、听感、延迟/underrun、泄漏、
+  真机新版压缩通过；未观察到 `ACTIVE`，也没有波形/录音/逐块日志。真机与 30 分钟长稳按用户要求延后。
+
 ### 2026-11-10 第二十三轮：DG-022 契约修正、Debug 构建与原生测试实测
 
 - 对照 media3 **1.5.1** 官方源码复核 `BaseAudioProcessor`：`onFlush()` 返回 **void**（第二十二轮的
@@ -384,9 +397,10 @@ adb shell am start -n com.dreamguard.app/.MainActivity
 - **实测（主代理）**：`.\gradlew.bat --no-daemon --offline :app:testDebugUnitTest :app:assembleDebug` **成功**，
   **80 JVM tests / 0 failures / 0 skipped**，Debug NDK 三个 ABI 编译通过；Android API 35 x86_64 模拟器
   `dg_pcm16_processor_tests` **206 checks / 0 failures**（27 组）、`dg_compressor_tests` **348 checks / 0 failures**。
-- **边界**：本轮**未安装/未运行 APK**，没有真实 JNI 调用、音频输出、波形/听感；JVM JNI 合约与 mock
+- **边界**：第二十三轮未安装/未运行 APK，没有真实 JNI 调用、音频输出、波形/听感；JVM JNI 合约与 mock
   **不等于**实测 JNI；未做 true peak、长时间听感、多设备；用户明确长时间真机测试暂缓。
-  **本轮修改未提交**（主代理将整理提交并推送）。
+  第二十四轮已安装运行到“播放中 + 本地压缩就绪”，但仍不证明逐块 native 处理或真实音频输出。
+  **第二十三轮代码已随 `4b7ace3` 推送；第二十四轮日志/状态更新未提交**。
 
 ### 2026-11-10 第二十二轮：DG-022 本地 PCM16 → native 压缩器（功能构建；第二十三轮已补构建/测试）
 
@@ -550,11 +564,15 @@ adb shell am start -n com.dreamguard.app/.MainActivity
   40 s / 44.1 kHz / 单声道 PCM16 WAV，对声音、−6 dB、暂停恢复、爆音卡顿**合并答复“正常”**；
   锁屏约 15 s 持续，播放其他媒体后 DreamGuard 暂停，关闭本地音轨后 DSP 声景出声。
   日志无 `FATAL EXCEPTION` / `UnsatisfiedLinkError`（无 nativeloader 成功行，以实际出声为间接证据）；未录音频/波形。
-- [ ] 本地音频的完整验收仍未满足：**真机播放与听感已由用户在 iQOO Z9T 上确认（第二十一轮，“正常”为合并答复，对应旧 Kotlin −6 dB 链路）**；第二十二/二十三轮已把 PCM16 接入 C++ 压缩器并修正 media3 契约，第二十三轮构建与 native/JVM 测试通过（80 JVM tests / 0 failures、PCM16 206/0、compressor 348/0），但**未安装/未运行 APK**，因此真实 JNI 调用、输出波形/电平、延迟与 underrun、其他格式/采样率、错误路径、通知栏暂停/恢复、进程重建恢复均未实测；用户明确长时间真机测试暂缓。
+- [ ] 本地音频的完整验收仍未满足：**真机播放与听感已由用户在 iQOO Z9T 上确认（第二十一轮，“正常”为合并答复，对应旧 Kotlin −6 dB 链路）**；第二十二/二十三轮已把 PCM16 接入 C++ 压缩器并修正 media3 契约，第二十三轮构建与 native/JVM 测试通过（80 JVM tests / 0 failures、PCM16 206/0、compressor 348/0）；**第二十四轮已在 API 35 x86_64 模拟器安装当前 Debug APK、选中 40 s/44.1 kHz/mono PCM16 WAV，UI 播放中 + “本地压缩就绪”、开关 `checked=true`，MediaSession `PLAYING`、进程存活、无 FATAL/UnsatisfiedLinkError**。但这只证明应用播放状态与处理器就绪，**不证明**逐块 `nativeProcess`、实际音频输出电平/波形、听感、延迟/underrun、泄漏或真机通过；其他格式/采样率、错误路径、通知栏暂停/恢复、进程重建恢复均未实测；用户明确延后真机与 30 分钟长稳。
 - [ ] 第二十三轮新增/修正的 C++ `dg_pcm16_processor`（27 组）与 JVM `LocalAudioProcessorTest`（18 个）已随构建执行
   （206/0、80 JVM tests/0）；`NativePcmProcessorContractTest`（4 个）也通过，但它与 `FakeCompressor` **不等于实测 JNI**；
   `onFlush()` 已按 media3 1.5.1 修正并编译通过；arm64/armeabi 只编译未运行、ASan/LSan 未做。
   开关“本地压缩”与 makeup −6.02 dB 是设计替代，不是听感验证。
+- [x] 2026-11-10 第二十四轮（模拟器状态）：代码提交 `4b7ace3` 已推送；主代理在 API 35 x86_64 模拟器安装并启动
+  当前 Debug APK，系统选择器选中合成 40 s / 44.1 kHz / 单声道 PCM16 WAV；UI 播放中，格式提示“本地压缩就绪”，
+  打开处理开关后 `checked=true`；MediaSession `PLAYING`、进程存活、`AndroidRuntime:E` 无 FATAL/UnsatisfiedLinkError。
+  该证据只覆盖应用播放状态与 native `READY`，不覆盖实际音频输出、听感、延迟/泄漏或真机。
 - [x] x86_64 模拟器：2026-11-10 在 AVD `ime35`（API 35）上完成安装、启动、播放冒烟，并运行 native 生命周期测试；真机以外的听感/长稳仍未评估。
 - [ ] **泄漏检测未做**：仓库没有 ASan/LSan 作业，DG-010 的「无资源泄漏」未验证。
 - [ ] **DG-012 的测试只在 x86_64 上运行过**：`dg_meter` 207/0、`dg_lufs` 238/0、扩展 C 头兼容 PASSED；

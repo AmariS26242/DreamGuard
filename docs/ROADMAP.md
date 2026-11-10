@@ -155,7 +155,8 @@
   JVM `up-to-date`。验收第 1 条“测试信号处理符合预期”达成 → 登记 **`DONE`**；验收第 2 条“无明显爆音或抽吸”只有
   无爆音断言与设计论证，**无听感/真机证据**，压缩器当时也未接入播放链路，故**不标 `VERIFIED`**，也不得描述成“音质已验收”。
   第二十二轮起压缩器经 `dg_pcm16_processor` 桥接入本地 PCM16 播放链路；第二十三轮已编译并跑通
-  PCM16 桥 206/0 与压缩器 348/0，但**未运行 APK 播放**，不改变本任务 `DONE`（不标 `VERIFIED`）的状态。
+  PCM16 桥 206/0 与压缩器 348/0；第二十四轮已安装运行 APK 并在 UI 看到“本地压缩就绪”，
+  但**没有真实音频输出/听感证据**，不改变本任务 `DONE`（不标 `VERIFIED`）的状态。
   已知边界：无 lookahead、无限幅器、无 true peak、无侧链/并行混合/自动 release；makeup 为正时输出可超 0 dBFS
   （计入 `clip_samples`，属 DG-014 范围）。
 
@@ -184,6 +185,8 @@
   **第二十三轮**已随 Debug 构建编译并链接进三个 ABI；`NativePcmProcessorContractTest` 在
   **80 JVM tests / 0 failures / 0 skipped** 中通过，但它验证的是声明名、无 Kotlin 模块后缀与符号集合，
   **不是 JNI 运行**；没有设备/模拟器播放调用 `nativeProcess` 的证据，JVM 合约与 mock 不能替代实测 JNI。
+  **第二十四轮**模拟器播放显示“本地压缩就绪”，可**间接**说明 native 库加载与 `nativeCreate` 未报错，
+  但 `nativeProcess`/`reset`/`destroy` 仍无设备侧证据。
   “反复创建、处理、释放不发生崩溃”仍只有第四轮 API 35 模拟器 **1328 checks / 0 failures**（旧桥 + 声景引擎）
   的旧证据，不能移用给新 surface，故不标 `VERIFIED`。
 
@@ -203,6 +206,9 @@
   声音持续，播放其他媒体后 DreamGuard 暂停，关闭本地音轨后 DSP 声景正常出声。日志：进程存活、MediaSession
   `PAUSED`、无 `FATAL EXCEPTION` / `UnsatisfiedLinkError`（无 nativeloader 成功行，以实际出声为间接证据）。
   **第二十三轮只构建了 Debug APK（80 JVM tests / 0 failures、Debug 三 ABI），未安装/未运行**。
+  **第二十四轮已安装启动当前 Debug APK，系统选择器选 40 s / 44.1 kHz / mono PCM16 WAV，UI 播放中，
+  MediaSession `PLAYING`，进程存活，`AndroidRuntime:E` 无 FATAL/UnsatisfiedLinkError**；仍无音频输出/波形/
+  听感、真机、播放进度 UI。
   **交付物“播放进度”仍未实现**，多格式、多路由（蓝牙/有线/外放）、进程重建、30 分钟长稳均未测，
   故仍 `IN_PROGRESS`，不标 `DONE` / `VERIFIED`。
 
@@ -227,9 +233,10 @@
   compressor 输出参数统一为 `dg_pcm_buffer`（首轮 native 类型错误已修）。**主代理实测**：
   `--offline :app:testDebugUnitTest :app:assembleDebug` **成功**、**80 JVM tests / 0 failures / 0 skipped**、
   Debug 三 ABI 编译通过；API 35 x86_64 模拟器 `dg_pcm16_processor_tests` **206 checks / 0 failures**、
-  `dg_compressor_tests` **348 checks / 0 failures**。**边界**：未运行 APK 播放，JVM fake 后端 ≠ 实测 JNI；
-  无真实音频输出、波形/听感、真机、true peak。验收“真实音频通过 DSP 后正常播放”仍未取得，故保持
-  `IN_PROGRESS`，不标 `DONE`/`VERIFIED`。
+  `dg_compressor_tests` **348 checks / 0 failures**。**边界**：第二十三轮未运行 APK；**第二十四轮已安装运行，
+  打开处理开关 `checked=true` 并显示“本地压缩就绪”（`READY`）**，但未观察到 `ACTIVE`、无逐块日志/波形/录音，
+  JVM fake 后端 ≠ 实测 JNI；无真实音频输出、听感、真机、true peak。验收“真实音频通过 DSP 后正常播放”仍未取得，
+  故保持 `IN_PROGRESS`，不标 `DONE`/`VERIFIED`。
 
 ### DG-023：Android 基础 UI
 
@@ -241,7 +248,8 @@
   模拟器无音频输出、无听感、无截图比对；“关闭回内置轨”“错误路径”未实测；“自然模式/响度显示”仍未做
   （本轮开关是处理 bypass）。**第二十一轮 iQOO Z9T 真机**走通“选 40 s WAV → 播放 → −6 dB → 暂停/恢复 →
   关闭回 DSP 声景”，用户答复“正常”、无爆音卡顿；错误路径、进程重建、通知栏控制与截图/波形仍未做。
-  **第二十三轮只构建 Debug APK，未安装/未运行**，本轮开关与格式提示改动未在设备上验证。
+  **第二十三轮只构建 Debug APK，未安装/未运行**；**第二十四轮模拟器 UI 显示播放中、格式提示“本地压缩就绪”、
+  开关 `checked=true`**，但无截图比对/真实听感/错误路径/进程重建/真机验证。
   验收主路径已覆盖但不完整，保持 `IN_PROGRESS`。
 
 ## 5. Phase 3：睡眠体验
@@ -387,8 +395,9 @@ API 35 模拟器实测 **2113 checks / 0 failures**，Gradle `testDebugUnitTest 
 三个 ABI 通过、JVM up-to-date；但只保证 sample peak，未做过采样 true-peak 测量、无真机/听感、未接播放链路，
 验收仍未达成）。
 DG-020 `DONE` 不标 `VERIFIED`（第二十二轮新增独立 PCM surface：`NativePcmProcessor` 5 个 JNI 符号与
-`NativePcmProcessorContractTest`；**第二十三轮已编译进 Debug 三 ABI，契约测试在 80 JVM tests 中通过**，
-但没有设备 JNI 运行证据，旧 9 符号证据仍为第四轮 1328/0）。
+`NativePcmProcessorContractTest`；**第二十三轮已编译进 Debug 三 ABI，契约测试在 80 JVM tests 中通过**；
+第二十四轮模拟器“本地压缩就绪”间接说明库加载/`nativeCreate` 未报错，但无 `nativeProcess`/`reset`/`destroy`
+设备证据，旧 9 符号证据仍为第四轮 1328/0）。
 DG-021 / DG-022 / DG-023 `IN_PROGRESS`（第十九轮写入本地文件选择与播放/暂停/恢复、`LocalAudioProcessor`
 （−6 dB、bypass 位精确、格式协商/flush/EOS）、`LocalAudioRenderersFactory` 注入、最小 UI 与 10 个 JVM 测试；
 **第二十轮主代理真实执行**：`testDebugUnitTest --rerun-tasks assembleDebug` 成功、68 tests / 0 failures /
@@ -403,7 +412,10 @@ DG-021 / DG-022 / DG-023 `IN_PROGRESS`（第十九轮写入本地文件选择与
   **第二十三轮按 media3 1.5.1 修正 `onFlush()` 签名并改为 flush 时创建/替换句柄**，补强失败后开关与格式提示；
   **主代理实测**：`--offline :app:testDebugUnitTest :app:assembleDebug` 成功、**80 JVM tests / 0 failures /
   0 skipped**、Debug 三 ABI；API 35 x86_64 模拟器 `dg_pcm16_processor` **206/0**、`dg_compressor` **348/0**。
-  **边界**：未运行 APK 播放，JVM mock ≠ 实测 JNI；第二十/二十一轮证据对应旧 Kotlin −6 dB 链路，
+  **边界**：第二十三轮未运行 APK；**第二十四轮已安装启动当前 APK，系统选择器选 40 s/44.1kHz/mono PCM16 WAV，
+  UI 播放中 + “本地压缩就绪”（READY）、开关 checked=true、MediaSession PLAYING、AndroidRuntime:E 无
+  FATAL/UnsatisfiedLinkError**；但这只证明播放状态与处理器就绪，**不证明**逐块 nativeProcess、实际音频输出、
+  听感、延迟/泄漏或真机通过；JVM mock ≠ 实测 JNI；第二十/二十一轮证据对应旧 Kotlin −6 dB 链路，
   不能移用给新 native 链路；仍缺播放进度 UI、多格式/多路由/进程重建/30 分钟长稳/波形/听感证据，
   三项维持 `IN_PROGRESS`，不标 `DONE` / `VERIFIED`）。
 
