@@ -5,6 +5,177 @@
 
 ---
 
+## 2026-11-11 — 第 30 轮 DG-025 独立构建与模拟器短测
+
+**任务** DG-025，状态 IN_PROGRESS。DeepSeek V4.1 Flash 以只读档分析，以工作区写入档实现和修正。Codex 独立构建、运行测试和核对设备状态。
+
+**构建** Gradle :app:testDebugUnitTest :app:assembleDebug 最终成功。首次在服务绑定方法处编译失败，Flash 修正后 APK 可安装。随后一次全量运行中 45 项 DG-025 测试通过，既有 NativeAudioEngineTest 的异步失败观察用例在 start 断言处失败。最终包复跑全量 137 项，0 失败、0 跳过。该既有测试未改。
+
+**APK** Debug SHA-256 为 5DE4FB698627A292FE148BF610F173D914FCF2C03BB3629FEA1524EDD6AF6AF4。最终修订为每次运行生成独立取消令牌，并把完整令牌纳入通知动作的 Intent 标识，避免服务重建后复用旧编号。
+
+**设备** API 35 x86_64 模拟器。AOSP AudioPreview 播放 180 秒合成 WAV。模拟器关闭主机音频输出，证据来自系统音量、播放与焦点状态。
+
+| 操作 | 实际结果 |
+| --- | --- |
+| 1 分钟定时与 1 分钟渐弱，切到 AOSP 播放器 | STREAM_MUSIC 依次为 6、5、4、3、2。dumpsys audio 记录由 DreamGuard 写入。播放器在第 5、17、32、47、63 秒采样时均处于 started，DreamGuard 未出现在焦点栈，返回应用显示目标 13% 和定时完成。 |
+| 渐弱一步后取消 | 6/15 降到 5/15 后点取消。页面显示已取消，超过下一次应下调的时间仍为 5/15。 |
+| 应用内滑块和系统音量键 | 应用内滑块写到 7/15 后显示手动结束。另一轮在 AOSP 播放期间按音量键，7/15 降至 6/15，回到 DreamGuard 显示保留手动设定 40%。 |
+| Home 后短时锁屏 | mWakefulness=Asleep 时，第 20、40、63 秒回读 5/15、4/15、2/15。音频服务另记录了 3/15 中间档，唤醒后页面显示完成。该轮单独验证锁屏，不含第三方播放器。 |
+| 定时运行中强停再打开 | 强停前服务已进入 specialUse 前台。强停前后与重开均为 6/15，页面提示上次定时已中断。 |
+
+**待补证据** iQOO Z9T（Android 16）、哔哩哔哩 9.18.0 和蓝牙 A2DP 在准备阶段可用，安装本轮 APK 前真机从 ADB 断开。设备上的播放与听感、边界、不可调输出和设备切换仍待复测。通知取消按钮、拒绝通知权限和 Activity 旋转未在本轮操作。所有长测按路线图统一排期。
+
+---
+
+## 2026-11-10 — 第 29 轮：DG-025 按 Codex 核验修复（会话取消、expected-index 守卫、原子持久化）
+
+**Commit**：未提交（用户要求不提交、不推送）。
+
+**完成任务编号**：DG-025（睡眠定时与渐弱控制）。状态保持 `IN_PROGRESS`。
+
+**为什么记**
+
+Codex 独立核验 `:app:compileDebugKotlin` 失败，并指出通知取消 identity、定时写 expected-index 守卫、
+输出路由检测与持久化原子性等问题。本轮按这 5 项修复；构建、JVM 测试与模拟器仍由 Codex 复跑。
+
+**修改模块**
+
+- `SleepTimerService.kt`
+  - 修复 `onBind`：非 `ACTION_BIND_UI` 直接返回 `null`，不再调用抽象的 `super.onBind(intent)`；
+    UI 仍走 `ACTION_BIND_UI`，通知动作仍走 `getService`。
+  - 收敛为单一启动路径：卡片只 `startService(ACTION_START + 配置)`；去掉绑定直接 `startTimer` 与
+    `ACTION_KEEP_ALIVE` 双路径。绑定只用于状态读取与按 session 取消。
+  - 通知取消 PendingIntent 使用 per-session request code + `EXTRA_SESSION`；`cancelTimer(token)` 只对当前
+    `currentSession` 生效，过期通知/旧卡片取消不会停掉下一轮。卡片取消携带 `SleepTimerStatus.session`。
+  - `currentSession` 在定时线程分配；start/finalize 的 main 消息重新校验 session 与 `finalized`；
+    `startInProgress`/`pendingStarts` 防止旧取消在启动消息落地前 `stopSelf`；取消/手动/销毁同步关闭定时写屏障。
+  - `POST_NOTIFICATIONS` 改为定时 RUNNING 后由卡片请求，先启动服务再请求权限。
+  - `AudioDeviceCallback` 只处理 sink；API 33+ 用 `AudioManager.getAudioDevicesForAttributes(USAGE_MEDIA)`，
+    旧系统回退 `getDevices(GET_DEVICES_OUTPUTS)`，均过滤 `isSink`；首个设备快照仍忽略。
+  - 启动接受后先在定时线程 `recovery.markActive`（durable commit），成功后才进入前台/首个 tick。
+- `SystemMediaVolume.kt`
+  - 新增 `setIndexGuarded(requested, expected)`：在真正写前最后一次读系统音量，若 current 不再是 expected
+    返回 `EXTERNAL` 且零写；clamp 到平台范围后若不低于当前返回 `NOT_LOWER` 且零写；否则写入并回读。
+    新增 `EXTERNAL` / `NOT_LOWER` 两个结果枚举。普通 DG-024 `setIndex` 未改。
+- `SleepTimerEngine.kt`
+  - `SleepTimerVolume.write(index, expectedIndex)`；生产适配改为 `setIndexGuarded`。
+  - 每次渐弱写（含最终写）在共享 `SleepTimerWriteBarrier` 内再次检查 gate，再调用 expected-index 守卫；
+    `EXTERNAL`/`NOT_LOWER` 都结束定时并保留当前值。
+- 新增 `SleepTimerWriteBarrier.kt`：`ReentrantLock` 短屏障；滑块手动写持锁，定时写只在 enabled + gate 匹配时写。
+- `SleepTimerRuntime.kt`：`runInAppVolumeWrite` 在滑块自己的写之前同步失效 gate、关闭定时写、通知服务，
+  并与定时写共用同一屏障；无定时时只多一个短屏障。
+- `SleepTimerPersistence.kt`
+  - 状态转换改为单个 `SleepTimerKeyValueStore.transact(durable, block)`；生产端一个 `SharedPreferences.Editor`
+    一次 `apply`/`commit`，不再逐键 apply。
+  - `markActive(config)` 返回 Boolean，使用 durable commit；由定时线程在首个写之前调用。active 写失败则
+    `SERVICE_FAILED`，不启动。
+  - 移除未使用的 `started_at`/`fade_ms` 键；终态仍用 `apply`，避免主线程磁盘等待。
+- `SleepTimerModel.kt`：`SleepTimerStatus.session`（服务分配、卡片取消使用）。
+- `SleepTimerCard.kt`：`LaunchedEffect` 在 RUNNING 后请求通知权限；取消携带 session；去掉绑定启动/权限先行。
+- `DreamGuardScreen.kt`：系统音量滑块改用 `SleepTimerRuntime.runInAppVolumeWrite`。
+- 测试：新增 `SleepTimerVolumeGuardTest.kt`（9 个）；`SleepTimerRecoveryTest.kt` 改为事务存储并扩到 9 个；
+  `SleepTimerEngineTest.kt` 保持 27 个。DG-025 合计 **45 个**，工程全部 137 个。
+
+**测试设备 / 测试结果**
+
+| 项目 | 结果 |
+| --- | --- |
+| 本会话命令环境 | `pwsh` 启动阶段仍报 `SetNamedSecurityInfoW failed (Win32 5): grantWrite(E:\DreamGuard)`；按委派未改 ACL、未提权、未运行 Gradle/设备命令 |
+| `:app:compileDebugKotlin` | **未执行**；`onBind` 等修复只经静态核对，由 Codex 复跑确认 |
+| JVM 测试 | **未执行**；45 个 DG-025 测试与既有 92 个均无 tests/failures 数字 |
+| APK / 模拟器 / 真机 | **未构建、未安装、未运行**；通知会话、权限、路由、真实音量均未验证 |
+| 静态核对 | 逐文件检查 `onBind`、session 传递、start/finalize 守卫、屏障/expected 守卫、事务与设备路由 API；不替代编译 |
+
+**证据边界**
+
+- 不声称新代码可构建，不声称 45/137 个测试通过，不声称既有功能回归通过。
+- 不声称通知/卡片旧 token 在真实系统上一定被拒绝；只在 JVM 逻辑与静态路径上成立。
+- 不声称 `getAudioDevicesForAttributes` 在目标设备上的返回与旧系统回退一致；未上设备。
+- 不声称共享屏障消除了所有竞争：外部硬件键/其他应用 Binder 写与 `setIndexGuarded` 最后快照到
+  `setStreamVolume` 之间的窗口仍非原子。
+- 不声称真实 SharedPreferences 的 commit/apply 行为已实测；JVM 只覆盖事务语义。
+- 未做第三方播放器共存、锁屏/后台、Doze/OEM、固定/单级、蓝牙/有线/外放、长测。
+- 未新增依赖、未改 Gradle/ROADMAP、未提交/推送、未操作真实设备。
+
+**未解决问题及下一步**
+
+1. Codex 复跑 `:app:compileDebugKotlin`，确认 `onBind` 修复与 Compose/Manifest/API 33 路由调用编译通过。
+2. Codex 复跑 `:app:testDebugUnitTest`，回填 45 个 DG-025 测试与既有 92 个的结果。
+3. 模拟器/真机验证 `specialUse` 启动、通知权限拒绝、旧通知取消被拒、快速开始/取消、Activity 重建、
+   进程杀死后的中断提示。
+4. 1 分钟短测验证保持段零写、渐弱逐级、完成回读、滑块/音量键手动优先，以及路由切换时零旧目标写。
+5. 最后再做第三方播放器共存、锁屏/后台、Doze/OEM 与长测。
+
+---
+
+## 2026-11-10 — 第 28 轮：DG-025 睡眠定时与渐弱（代码 + 33 个未执行 JVM 测试）
+
+**Commit**：未提交（用户要求不提交、不推送）。
+
+**完成任务编号**：DG-025（睡眠定时与渐弱控制）。状态 `IN_PROGRESS`，不标 `DONE`/`VERIFIED`。
+
+**为什么记**
+
+路线图把 DG-025 排在 DG-024 之后。本轮按委派实现“独立定时卡 + 纯 Kotlin 状态机 + `specialUse` 前台服务 +
+持久化终态 + JVM 测试”，但本会话只能做就地静态检查：`pwsh` 在启动阶段仍报
+`SetNamedSecurityInfoW failed (Win32 5): grantWrite(E:\DreamGuard)`，且委派明确要求不运行可能写入授权目录外的构建，
+所以**没有 Gradle、没有测试运行、没有设备**。必须把“代码已写入”和“行为已验证”严格分开。
+
+**修改模块**
+
+- 新增 `app/src/main/java/com/dreamguard/app/audio/SleepTimerModel.kt`：配置/状态/终态/校验/剩余时间格式化；
+  目标钳制到平台最小索引，固定/单级/读失败/目标不够低/非法时长都有显式拒绝原因。
+- 新增 `SleepTimerEngine.kt`：纯 Kotlin 状态机。保持段零写；渐弱按平台索引单调逐级；每次写（含最终写）
+  做输出签名、gate epoch、写前快照、写后回读四道守卫；只有目标回读成功才 `COMPLETED`；外部变化优先并保留用户值；
+  取消/故障/输出变化都没有恢复旧音量的代码路径。明确注释“读→写→回读”无法原子判定的窗口。
+- 新增 `SleepTimerPersistence.kt`：active 标记 + 终态记录 + 新进程 `INTERRUPTED` 恢复；恢复零音量写。
+- 新增 `SleepTimerRuntime.kt`：进程级 gate 与服务引用；应用内音量滑块在写前同步调用
+  `cancelForInAppVolumeChange()`，阻止下一个 tick 再降音量。
+- 新增 `SleepTimerService.kt`：非 exported `specialUse` 前台服务；单 HandlerThread 串行执行 start/tick/cancel
+  与全部音量写；会话令牌 + `finalized` 保证快速开始/取消、陈旧通知动作、自然结束与清理幂等；
+  `START_NOT_STICKY`、无 boot receiver、无精确闹钟/整段唤醒锁；通知含取消动作；`startForeground` 失败落
+  `SERVICE_FAILED`，不保留假运行状态。
+- 新增 `app/src/main/java/com/dreamguard/app/ui/SleepTimerCard.kt`，并改 `DreamGuardScreen.kt`：
+  系统媒体音量卡下方新增定时卡（含 1 分钟短测项、渐弱时长、目标音量、剩余时间、取消、终态/异常提示）；
+  系统音量滑块写前同步终止定时；播放服务未连接时定时卡仍可用。
+- 改 `MainActivity.kt`：启动时把持久化 active 标记转为中断提示；不改自动恢复。
+- 改 `AndroidManifest.xml`：声明 `FOREGROUND_SERVICE_SPECIAL_USE`、`POST_NOTIFICATIONS`，注册独立服务与
+  specialUse subtype；新增 `res/drawable/ic_sleep_timer.xml`。
+- 新增 `app/src/test/java/com/dreamguard/app/audio/SleepTimerEngineTest.kt`（27 个）与
+  `SleepTimerRecoveryTest.kt`（6 个），合计 **33 个**新 JVM 测试。
+
+**测试设备 / 测试结果**
+
+| 项目 | 结果 |
+| --- | --- |
+| 本会话命令环境 | `pwsh` 启动阶段报 `SetNamedSecurityInfoW failed (Win32 5): grantWrite(E:\DreamGuard)`；按委派未改 ACL、未提权、未运行 Gradle/设备命令 |
+| Gradle 构建 | **未执行**；Kotlin/Compose/Manifest 仅静态核对 |
+| JVM 测试 | **未执行**；33 个测试只是已写入，**没有 tests/failures 数字** |
+| APK / 模拟器 / 真机 | **未构建、未安装、未运行**；通知/权限/前台服务/真实音量/锁屏/Doze 均未验证 |
+| 静态核对 | 逐文件检查 Kotlin 声明、导入、Manifest 服务/权限、Compose 调用与测试用例逻辑；未发现需要构建才能定位的明显语法问题（但静态检查不能替代编译） |
+
+**证据边界**
+
+- 不声称新代码可构建，不声称 33 个测试通过，不声称既有 92 个测试回归通过。
+- 不声称 `specialUse` 前台服务在 API 26–35 上能启动，不声称拒绝 `POST_NOTIFICATIONS` 后通知/取消按预期工作。
+- 不声称真实 `STREAM_MUSIC` 被渐弱、不声称音量键/其他应用改变时定时在设备上正确结束、不声称输出切换检测有效。
+- 应用内滑块与定时写之间的竞争窗口只被 gate 同步失效 + 每次写前检查缩小；`setStreamVolume` 已进入时无法抢占，
+  该非原子窗口**未消除**。
+- 恢复语义只覆盖“持久化标记 → 新进程提示”，**不**做定时跨进程恢复，**不**恢复旧音量（设计上明确不恢复）。
+- 未做第三方播放器共存、锁屏/后台长时、Doze/OEM、固定/单级输出、蓝牙/有线/外放、30 分钟长测。
+- 未新增依赖、未改 Gradle 配置、未改 `docs/ROADMAP.md`、未提交/推送。
+
+**未解决问题及下一步**
+
+1. 主代理在授权范围内执行 `.\gradlew.bat --no-daemon --offline :app:testDebugUnitTest :app:assembleDebug`，
+   回填 33 个新测试与既有 92 个的结果；若 Compose/Manifest 编译报错，按报错修正。
+2. API 34+ 模拟器/真机验证 `specialUse` 启动、通知取消、拒绝 `POST_NOTIFICATIONS` 后的卡片取消。
+3. 短测 1 分钟选项：保持段不写、渐弱逐级、结束回读目标；音量键/系统面板中途调节是否立即结束且保留用户值。
+4. 进程杀死后的“上次定时已中断”提示、快速开始/取消、Activity 重建、陈旧通知动作。
+5. 最后再做第三方播放器共存、锁屏/后台、Doze/OEM 与真机边界；长测仍排在全部功能之后。
+
+---
+
 ## 2026-11-10 — 调整长测排期
 
 项目功能全部实现后再统一开展长测，包括 30 分钟连续播放、长时间锁屏及后台运行。各阶段用必要的自动测试和短测验证功能，下一阶段为 DG-025 睡眠定时与渐弱。

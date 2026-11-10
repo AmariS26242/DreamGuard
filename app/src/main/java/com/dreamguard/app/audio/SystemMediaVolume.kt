@@ -85,6 +85,18 @@ data class SystemVolumeWriteResult(
 
         /** The write was rejected, threw, or was silently ignored by the platform. */
         FAILED,
+
+        /**
+         * Guarded write only: the channel no longer held the timer's expected
+         * index, so nothing was written. The user's/new value wins.
+         */
+        EXTERNAL,
+
+        /**
+         * Guarded write only: the requested level would not lower the channel,
+         * so nothing was written.
+         */
+        NOT_LOWER,
     }
 
     val isApplied: Boolean get() = outcome == Outcome.APPLIED
@@ -194,6 +206,100 @@ class SystemVolumeController(private val backend: MediaVolumeBackend) {
                 requestedIndex = requestedIndex,
                 appliedIndex = after.currentIndex,
                 message = "调整系统媒体音量失败：${failure.message ?: "系统拒绝"}"
+            )
+        }
+    }
+
+    /**
+     * Timer-only guarded write (DG-025).
+     *
+     * Unlike [setIndex], this re-reads the channel immediately before writing and
+     * refuses to write when the current index is not [expectedIndex]. That closes
+     * the window in which the timer's earlier tick snapshot is stale and it would
+     * otherwise write an old target over a value the user just set. It also
+     * refuses to raise the channel or to keep the same level.
+     *
+     * Normal DG-024 slider writes keep using [setIndex] and its original
+     * semantics; [Outcome.EXTERNAL] and [Outcome.NOT_LOWER] are only produced here.
+     */
+    fun setIndexGuarded(requestedIndex: Int, expectedIndex: Int): SystemVolumeWriteResult {
+        val before = readSnapshot()
+        if (!before.isAvailable) {
+            return SystemVolumeWriteResult(
+                outcome = SystemVolumeWriteResult.Outcome.UNAVAILABLE,
+                requestedIndex = requestedIndex,
+                appliedIndex = before.currentIndex,
+                message = before.readError ?: "无法读取系统媒体音量",
+            )
+        }
+        if (before.isFixed) {
+            return SystemVolumeWriteResult(
+                outcome = SystemVolumeWriteResult.Outcome.FIXED,
+                requestedIndex = requestedIndex,
+                appliedIndex = before.currentIndex,
+                message = "此设备的媒体音量由硬件固定，应用无法调节",
+            )
+        }
+        if (before.maxIndex <= before.minIndex) {
+            return SystemVolumeWriteResult(
+                outcome = SystemVolumeWriteResult.Outcome.UNAVAILABLE,
+                requestedIndex = requestedIndex,
+                appliedIndex = before.currentIndex,
+                message = "当前输出只有一个音量级别，无法调节",
+            )
+        }
+
+        // Last system read before the write: the timer's expected index must
+        // still be what the channel holds.
+        if (before.currentIndex != expectedIndex) {
+            return SystemVolumeWriteResult(
+                outcome = SystemVolumeWriteResult.Outcome.EXTERNAL,
+                requestedIndex = requestedIndex,
+                appliedIndex = before.currentIndex,
+                message = "检测到系统媒体音量已被外部改变（当前 ${before.percent}%），未写入",
+            )
+        }
+
+        // Clamp into the platform range, then enforce "only lower".
+        val target = requestedIndex.coerceIn(before.minIndex, before.maxIndex)
+        if (target >= before.currentIndex) {
+            return SystemVolumeWriteResult(
+                outcome = SystemVolumeWriteResult.Outcome.NOT_LOWER,
+                requestedIndex = requestedIndex,
+                appliedIndex = before.currentIndex,
+                message = "请求的音量不低于当前值（当前 ${before.percent}%），未写入",
+            )
+        }
+
+        return try {
+            backend.setIndex(target)
+            val after = refresh()
+            when {
+                !after.isAvailable -> SystemVolumeWriteResult(
+                    outcome = SystemVolumeWriteResult.Outcome.FAILED,
+                    requestedIndex = requestedIndex,
+                    appliedIndex = after.currentIndex,
+                    message = "已尝试调整，但无法确认系统媒体音量是否生效",
+                )
+                after.currentIndex == target -> SystemVolumeWriteResult(
+                    outcome = SystemVolumeWriteResult.Outcome.APPLIED,
+                    requestedIndex = requestedIndex,
+                    appliedIndex = after.currentIndex,
+                )
+                else -> SystemVolumeWriteResult(
+                    outcome = SystemVolumeWriteResult.Outcome.FAILED,
+                    requestedIndex = requestedIndex,
+                    appliedIndex = after.currentIndex,
+                    message = "写入后回读不是请求值（当前 ${after.percent}%）",
+                )
+            }
+        } catch (failure: RuntimeException) {
+            val after = refresh()
+            SystemVolumeWriteResult(
+                outcome = SystemVolumeWriteResult.Outcome.FAILED,
+                requestedIndex = requestedIndex,
+                appliedIndex = after.currentIndex,
+                message = "调整系统媒体音量失败：${failure.message ?: "系统拒绝"}",
             )
         }
     }

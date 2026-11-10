@@ -55,6 +55,7 @@ import com.dreamguard.app.audio.AudioManagerVolumeBackend
 import com.dreamguard.app.audio.AudioSettings
 import com.dreamguard.app.audio.LocalAudioProcessor
 import com.dreamguard.app.audio.PlaybackService
+import com.dreamguard.app.audio.SleepTimerRuntime
 import com.dreamguard.app.audio.SystemVolumeController
 import com.dreamguard.app.audio.SystemVolumeObserver
 import java.util.Locale
@@ -91,12 +92,15 @@ fun DreamGuardScreen() {
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color(0xFF0B1026)),
-            contentAlignment = Alignment.Center,
         ) {
             Column(
-                modifier = Modifier.padding(horizontal = 24.dp),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 24.dp, vertical = 20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
+                Spacer(Modifier.height(24.dp))
                 Text(
                     text = "正在连接播放服务…",
                     color = Color(0xFFB6BCDA),
@@ -104,6 +108,11 @@ fun DreamGuardScreen() {
                 )
                 Spacer(Modifier.height(20.dp))
                 SystemVolumeCard()
+                Spacer(Modifier.height(12.dp))
+                // The timer service is independent of playback, so it stays usable
+                // even while (or if) the playback-service bind is still pending.
+                SleepTimerCard()
+                Spacer(Modifier.height(24.dp))
             }
         }
         return
@@ -234,6 +243,10 @@ fun DreamGuardScreen() {
             // playback: it reads and writes the shared channel without starting
             // DreamGuard audio or requesting audio focus.
             SystemVolumeCard()
+
+            Spacer(Modifier.height(12.dp))
+
+            SleepTimerCard()
 
             Spacer(Modifier.height(12.dp))
 
@@ -461,7 +474,12 @@ private fun SystemVolumeCard() {
                     Slider(
                         value = snapshot.currentIndex.toFloat(),
                         onValueChange = { value ->
-                            val result = controller.setIndex(value.roundToInt())
+                            // The shared barrier terminates any running sleep
+                            // timer synchronously *before* this write, so a
+                            // queued old tick cannot overwrite the user's value.
+                            val result = SleepTimerRuntime.runInAppVolumeWrite {
+                                controller.setIndex(value.roundToInt())
+                            }
                             // A rejected write keeps its message; the slider snaps
                             // back to the value the system still holds.
                             writeMessage = if (result.isApplied) null else result.message
