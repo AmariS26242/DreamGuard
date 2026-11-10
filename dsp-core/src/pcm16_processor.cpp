@@ -1,0 +1,262 @@
+/* DreamGuard DSP core - PCM16 <-> compressor bridge (DG-022).
+ *
+ * See dreamguard/pcm16_processor.h for the contract. This file is deliberately
+ * small: conversion, chunking and the optional bit-exact copy. All dynamics
+ * behaviour lives in the DG-013 compressor.
+ */
+
+#include "dreamguard/pcm16_processor.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <new>
+
+#include "dreamguard/compressor.h"
+
+namespace {
+
+/* 1.0 in the int16 domain is 32767, but the standard mapping is s / 32768, so
+ * full-scale negative maps to exactly -1.0 and full-scale positive to
+ * 32767/32768. This is the same convention as PCM16 in every other tool. */
+constexpr float kPcm16Scale = 32768.0F;
+constexpr float kPcm16InverseScale = 1.0F / 32768.0F;
+
+/* Reads a native-endian PCM16 sample without assuming 2-byte alignment: a
+ * direct ByteBuffer from Media3 is not guaranteed to be more than byte aligned,
+ * and a misaligned int16_t load is undefined behaviour. */
+inline int16_t load_sample(const uint8_t* source) {
+    int16_t value = 0;
+    std::memcpy(&value, source, sizeof(value));
+    return value;
+}
+
+inline void store_sample(uint8_t* destination, int16_t value) {
+    std::memcpy(destination, &value, sizeof(value));
+}
+
+/* Rounds half away from zero and saturates. The compressor has no limiter, so
+ * a positive makeup gain can drive the signal past full scale; saturating is
+ * the only sane PCM16 result and is what the header documents. Non-finite
+ * values cannot come out of the compressor, but a zero fallback keeps the
+ * conversion total instead of relying on undefined float-to-int behaviour. */
+inline int16_t quantize(float sample) {
+    if (!std::isfinite(sample)) {
+        return 0;
+    }
+    const float scaled = sample * kPcm16Scale;
+    /* Clamp in float space before the integer conversion: converting a float that
+     * is outside the int32 range is undefined behaviour, and a positive makeup
+     * gain can legitimately produce values far above full scale. The saturation
+     * checks below then become belt-and-braces rather than load-bearing. */
+    const float clamped = std::clamp(scaled, -kPcm16Scale, kPcm16Scale - 1.0F);
+    int32_t value = 0;
+    if (clamped >= 0.0F) {
+        value = static_cast<int32_t>(clamped + 0.5F);
+        if (value > 32767) {
+            value = 32767;
+        }
+    } else {
+        value = static_cast<int32_t>(clamped - 0.5F);
+        if (value < -32768) {
+            value = -32768;
+        }
+    }
+    return static_cast<int16_t>(value);
+}
+
+double current_gain_reduction(const dg_compressor* compressor) {
+    dg_compressor_values snapshot{};
+    if (dg_compressor_snapshot(compressor, &snapshot) != DG_OK) {
+        return 0.0;
+    }
+    return snapshot.gain_reduction_db;
+}
+
+void write_values(dg_pcm16_processor_values* out_values, uint32_t frames,
+                  uint32_t bytes_written, int32_t bypassed, double gain_reduction_db) {
+    if (out_values == nullptr) {
+        return;
+    }
+    out_values->frames = frames;
+    out_values->bytes_written = bytes_written;
+    out_values->bypassed = bypassed;
+    out_values->gain_reduction_db = gain_reduction_db;
+}
+
+}  // namespace
+
+struct dg_pcm16_processor {
+    dg_compressor* compressor = nullptr;
+    int32_t sample_rate = 0;
+    int32_t channel_count = 0;
+    uint32_t frame_bytes = 0;
+    /* One chunk of interleaved floats; the compressor's input view and output
+     * buffer both describe it, which is an exact in-place operation. */
+    float scratch[static_cast<std::size_t>(DG_PCM16_CHUNK_FRAMES) *
+                  static_cast<std::size_t>(DG_PCM_CHANNELS_MAX)] = {};
+};
+
+extern "C" {
+
+dg_status dg_pcm16_processor_create(const dg_pcm16_processor_config* config,
+                                    dg_pcm16_processor** out_processor) {
+    if (out_processor == nullptr) {
+        return DG_ERR_INVALID_ARGUMENT;
+    }
+    *out_processor = nullptr;
+    if (config == nullptr) {
+        return DG_ERR_INVALID_ARGUMENT;
+    }
+    if (config->channel_count < DG_PCM_CHANNELS_MIN ||
+        config->channel_count > DG_PCM_CHANNELS_MAX) {
+        return DG_ERR_CHANNEL_COUNT_OUT_OF_RANGE;
+    }
+
+    dg_compressor_config compressor_config{};
+    compressor_config.sample_rate = config->sample_rate;
+    compressor_config.channel_count = config->channel_count;
+    compressor_config.threshold_db = config->threshold_db;
+    compressor_config.ratio = config->ratio;
+    compressor_config.knee_db = config->knee_db;
+    compressor_config.attack_ms = config->attack_ms;
+    compressor_config.release_ms = config->release_ms;
+    compressor_config.link_stereo = config->link_stereo;
+    compressor_config.makeup_gain_db = config->makeup_gain_db;
+
+    dg_compressor* compressor = nullptr;
+    const dg_status status = dg_compressor_create(&compressor_config, &compressor);
+    if (status != DG_OK) {
+        return status;
+    }
+
+    auto* processor = new (std::nothrow) dg_pcm16_processor();
+    if (processor == nullptr) {
+        (void)dg_compressor_destroy(compressor);
+        return DG_ERR_OUT_OF_MEMORY;
+    }
+
+    processor->compressor = compressor;
+    processor->sample_rate = config->sample_rate;
+    processor->channel_count = config->channel_count;
+    processor->frame_bytes =
+        static_cast<uint32_t>(config->channel_count) * DG_PCM16_BYTES_PER_SAMPLE;
+    *out_processor = processor;
+    return DG_OK;
+}
+
+dg_status dg_pcm16_processor_destroy(dg_pcm16_processor* processor) {
+    if (processor == nullptr) {
+        return DG_ERR_NULL_HANDLE;
+    }
+    (void)dg_compressor_destroy(processor->compressor);
+    processor->compressor = nullptr;
+    delete processor;
+    return DG_OK;
+}
+
+dg_status dg_pcm16_processor_reset(dg_pcm16_processor* processor) {
+    if (processor == nullptr) {
+        return DG_ERR_NULL_HANDLE;
+    }
+    return dg_compressor_reset(processor->compressor);
+}
+
+dg_status dg_pcm16_processor_process(dg_pcm16_processor* processor,
+                                     const void* input,
+                                     uint32_t input_bytes,
+                                     void* output,
+                                     uint32_t output_capacity,
+                                     int32_t bypass,
+                                     dg_pcm16_processor_values* out_values) {
+    write_values(out_values, 0, 0, 0, 0.0);
+    if (processor == nullptr) {
+        return DG_ERR_NULL_HANDLE;
+    }
+    if (input_bytes == 0) {
+        return DG_OK;
+    }
+    if (input == nullptr || output == nullptr) {
+        return DG_ERR_INVALID_ARGUMENT;
+    }
+    if (output_capacity < input_bytes) {
+        return DG_ERR_INVALID_ARGUMENT;
+    }
+
+    const auto input_address = reinterpret_cast<std::uintptr_t>(input);
+    const auto output_address = reinterpret_cast<std::uintptr_t>(output);
+    if (input_address != output_address) {
+        const auto input_end = input_address + input_bytes;
+        const auto output_end = output_address + output_capacity;
+        if (input_address < output_end && output_address < input_end) {
+            return DG_ERR_INVALID_ARGUMENT;
+        }
+    }
+
+    const auto* source = static_cast<const std::uint8_t*>(input);
+    auto* destination = static_cast<std::uint8_t*>(output);
+    const uint32_t frames = input_bytes / processor->frame_bytes;
+    const uint32_t processed_bytes = frames * processor->frame_bytes;
+
+    if (bypass != 0) {
+        std::memmove(destination, source, input_bytes);
+        write_values(out_values, frames, input_bytes, 1, 0.0);
+        return DG_OK;
+    }
+
+    uint32_t frame_index = 0;
+    while (frame_index < frames) {
+        const uint32_t chunk_frames = std::min(
+            frames - frame_index, static_cast<uint32_t>(DG_PCM16_CHUNK_FRAMES));
+        const std::size_t samples =
+            static_cast<std::size_t>(chunk_frames) *
+            static_cast<std::size_t>(processor->channel_count);
+        const std::size_t byte_offset =
+            static_cast<std::size_t>(frame_index) * processor->frame_bytes;
+
+        for (std::size_t sample = 0; sample < samples; ++sample) {
+            processor->scratch[sample] =
+                static_cast<float>(load_sample(source + byte_offset +
+                                               sample * DG_PCM16_BYTES_PER_SAMPLE)) *
+                kPcm16InverseScale;
+        }
+
+        const dg_pcm_view input_view{processor->scratch, chunk_frames,
+                                     processor->channel_count};
+        /* Writable output descriptor: dg_compressor_process takes dg_pcm_buffer for
+         * its output, the same type the limiter and the PCM helpers use. */
+        dg_pcm_buffer output_view{processor->scratch, chunk_frames,
+                                  processor->channel_count};
+        const dg_status status =
+            dg_compressor_process(processor->compressor, input_view, output_view);
+        if (status != DG_OK) {
+            return status;
+        }
+
+        for (std::size_t sample = 0; sample < samples; ++sample) {
+            store_sample(destination + byte_offset +
+                             sample * DG_PCM16_BYTES_PER_SAMPLE,
+                         quantize(processor->scratch[sample]));
+        }
+        frame_index += chunk_frames;
+    }
+
+    if (processed_bytes < input_bytes) {
+        /* A partial frame (for stereo a single sample, or one odd byte for
+         * mono) is passed through unchanged so the byte count is preserved. */
+        std::memmove(destination + processed_bytes, source + processed_bytes,
+                     input_bytes - processed_bytes);
+    }
+
+    write_values(out_values, frames, input_bytes, 0,
+                 current_gain_reduction(processor->compressor));
+    return DG_OK;
+}
+
+uint32_t dg_pcm16_processor_latency_frames(void) {
+    return 0;
+}
+
+}  // extern "C"

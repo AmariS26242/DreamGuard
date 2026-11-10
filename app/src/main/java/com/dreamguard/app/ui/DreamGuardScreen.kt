@@ -22,6 +22,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -40,12 +41,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
 import com.dreamguard.app.audio.AudioSettings
+import com.dreamguard.app.audio.LocalAudioProcessor
 import com.dreamguard.app.audio.PlaybackService
 import java.util.Locale
 
@@ -93,6 +97,17 @@ fun DreamGuardScreen() {
     val snapshot = controller.snapshot()
     val ambientEnabled = playback.ambientEnabled
     val playbackError = playback.error
+    val localActive = playback.localAudioActive
+    val localTitle = playback.localAudioTitle
+    val localPlaying = playback.localAudioPlaying
+    val processingEnabled = playback.localProcessingEnabled
+    val processingAvailable = playback.localProcessingAvailable
+    val formatNote = playback.localFormatNote
+    // ACTION_OPEN_DOCUMENT: the system picker grants a persistable read grant, so the
+    // service can keep playing the file after the activity is gone.
+    val pickAudio = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) playback.setLocalAudio(uri)
+    }
 
     Box(
         modifier = Modifier
@@ -253,6 +268,7 @@ fun DreamGuardScreen() {
 
             OutlinedButton(
                 onClick = { playback.toggleAmbient() },
+                enabled = !localActive,
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.outlinedButtonColors(
@@ -260,19 +276,137 @@ fun DreamGuardScreen() {
                 ),
             ) {
                 Text(
-                    text = if (ambientEnabled) "关闭环境音轨（Media3）" else "播放环境音轨（Media3）",
+                    text = when {
+                        localActive -> "本地音频使用中 · 关闭后恢复环境音轨"
+                        ambientEnabled -> "关闭环境音轨（Media3）"
+                        else -> "播放环境音轨（Media3）"
+                    },
                     fontSize = 14.sp,
                 )
             }
 
+            Spacer(Modifier.height(20.dp))
+
+            LocalAudioCard(
+                title = localTitle,
+                note = formatNote,
+                active = localActive,
+                playing = localPlaying,
+                processingEnabled = processingEnabled,
+                processingAvailable = processingAvailable,
+                onPick = { pickAudio.launch(arrayOf("audio/*")) },
+                onTogglePlayback = { playback.toggleLocalPlayback() },
+                onClose = { playback.closeLocalAudio() },
+                onProcessingChanged = { playback.setLocalProcessingEnabled(it) },
+            )
+
             Spacer(Modifier.height(28.dp))
             Text(
-                text = "无网络 / 麦克风 / 存储权限 · 声音只在本机合成",
+                text = "无网络 / 麦克风 / 存储权限 · 本地文件经系统选择器读取",
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.42f),
                 fontSize = 11.sp,
                 textAlign = TextAlign.Center,
             )
             Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun LocalAudioCard(
+    title: String?,
+    note: String?,
+    active: Boolean,
+    playing: Boolean,
+    processingEnabled: Boolean,
+    processingAvailable: Boolean,
+    onPick: () -> Unit,
+    onTogglePlayback: () -> Unit,
+    onClose: () -> Unit,
+    onProcessingChanged: (Boolean) -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        color = Color.White.copy(alpha = 0.055f),
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "本地音频",
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontSize = 14.sp,
+                )
+                Text(
+                    text = when {
+                        !active -> "未选择"
+                        playing -> "播放中"
+                        else -> "已暂停"
+                    },
+                    color = MaterialTheme.colorScheme.primary,
+                    fontSize = 13.sp,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = title ?: "通过系统文件选择器打开本机音频（无需存储权限）",
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                fontSize = 12.sp,
+            )
+            note?.let {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = it,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+                    fontSize = 11.sp,
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onPick) {
+                    Text(if (active) "更换文件" else "选择文件", fontSize = 13.sp)
+                }
+                if (active) {
+                    OutlinedButton(onClick = onTogglePlayback) {
+                        Text(if (playing) "暂停" else "播放", fontSize = 13.sp)
+                    }
+                    OutlinedButton(onClick = onClose) {
+                        Text("关闭", fontSize = 13.sp)
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column {
+                    Text(
+                        text = "处理（${LocalAudioProcessor.GAIN_LABEL}）",
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontSize = 13.sp,
+                    )
+                    Text(
+                        text = "开启时 PCM16 经 native 压缩器（−6 dB 补偿）；关闭时逐字节旁路",
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+                        fontSize = 11.sp,
+                    )
+                }
+                Switch(
+                    checked = processingEnabled,
+                    onCheckedChange = onProcessingChanged,
+                    // A file that cannot be processed keeps the switch disabled, but a
+                    // switch that is already on must stay reachable so the user can
+                    // always return to the bit-exact bypass (for example after a
+                    // native failure or while the format note explains the passthrough).
+                    enabled = processingAvailable || processingEnabled,
+                )
+            }
         }
     }
 }
