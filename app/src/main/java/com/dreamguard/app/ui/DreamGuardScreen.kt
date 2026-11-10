@@ -40,34 +40,59 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.os.IBinder
 import com.dreamguard.app.audio.AudioSettings
-import com.dreamguard.app.audio.Media3AmbientPlayer
-import com.dreamguard.app.audio.NativeAudioEngine
-import com.dreamguard.app.audio.PlaybackController
+import com.dreamguard.app.audio.PlaybackService
 import java.util.Locale
 
 @Composable
 fun DreamGuardScreen() {
     val context = LocalContext.current
-    val engine = remember { NativeAudioEngine() }
-    val controller = remember(engine) { PlaybackController(engine) }
-    val ambientPlayer = remember { Media3AmbientPlayer(context.applicationContext) }
-
-    var snapshot by remember { mutableStateOf(controller.snapshot()) }
-    var ambientOn by remember { mutableStateOf(false) }
-    var ambientError by remember { mutableStateOf<String?>(null) }
-
-    DisposableEffect(controller) {
-        controller.listener = { snapshot = controller.snapshot() }
+    var service by remember { mutableStateOf<PlaybackService?>(null) }
+    var revision by remember { mutableStateOf(0) }
+    DisposableEffect(context) {
+        val connection = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+                service = (binder as PlaybackService.LocalBinder).service.also {
+                    it.listener = { revision++ }
+                }
+                revision++
+            }
+            override fun onServiceDisconnected(name: ComponentName) { service = null }
+        }
+        val intent = Intent(context, PlaybackService::class.java).setAction(PlaybackService.ACTION_BIND_UI)
+        val bound = context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
         onDispose {
-            controller.listener = null
-            controller.release()
+            service?.listener = null
+            if (bound) context.unbindService(connection)
         }
     }
-
-    DisposableEffect(ambientPlayer) {
-        onDispose { ambientPlayer.release() }
+    val playback = service
+    if (playback == null) {
+        // The service bind is asynchronous; do not blank the whole screen while it runs.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF0B1026)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "正在连接播放服务…",
+                color = Color(0xFFB6BCDA),
+                fontSize = 13.sp,
+            )
+        }
+        return
     }
+    @Suppress("UNUSED_VARIABLE") val stateRevision = revision
+    val controller = playback.controller
+    val snapshot = controller.snapshot()
+    val ambientEnabled = playback.ambientEnabled
+    val playbackError = playback.error
 
     Box(
         modifier = Modifier
@@ -116,20 +141,26 @@ fun DreamGuardScreen() {
             Spacer(Modifier.height(32.dp))
 
             PlayButton(
-                isRunning = snapshot.isRunning,
+                // A deferred start is still the user's active play session; showing
+                // "play" here would make the next tap read as a start when it pauses.
+                isRunning = snapshot.isRunning || snapshot.retryableStart,
                 enabled = snapshot.isAvailable,
-                onClick = { controller.toggle() },
+                onClick = { playback.toggleDsp() },
             )
 
             Spacer(Modifier.height(18.dp))
 
             val statusText = when {
                 !snapshot.isAvailable -> "DSP 不可用（当前 ABI 未打包原生库）"
-                snapshot.isRunning -> "运行中 · DSP v${engine.versionLabel()}"
+                // The engine is healthy; it is waiting for the previous render thread
+                // to return. Saying so is better than a silent "standby".
+                snapshot.retryableStart -> "正在等待上一段音频结束…"
+                snapshot.isRunning -> "运行中 · DSP v${playback.version}"
                 else -> "待机"
             }
             val statusColor = when {
                 !snapshot.isAvailable -> MaterialTheme.colorScheme.error
+                snapshot.retryableStart -> MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
                 snapshot.isRunning -> Color(0xFF9BE7B0)
                 else -> MaterialTheme.colorScheme.onBackground.copy(alpha = 0.55f)
             }
@@ -139,14 +170,31 @@ fun DreamGuardScreen() {
                 fontSize = 13.sp,
             )
 
-            snapshot.lastError?.let { message ->
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    text = message,
-                    color = MaterialTheme.colorScheme.error,
-                    fontSize = 12.sp,
-                    textAlign = TextAlign.Center,
-                )
+            // A deferred start is not an error; showing the old failure text next to
+            // "waiting for the previous session" would contradict the status line.
+            if (!snapshot.retryableStart) {
+                snapshot.lastError?.let { message ->
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = message,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+
+                // Service-level failures (player error, exhausted retries, foreground
+                // service refusal) are shown in the same place as engine failures so
+                // they cannot be lost below the fold or mistaken for a user pause.
+                playbackError?.let { message ->
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = message,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                        textAlign = TextAlign.Center,
+                    )
+                }
             }
 
             Spacer(Modifier.height(28.dp))
@@ -204,19 +252,7 @@ fun DreamGuardScreen() {
             Spacer(Modifier.height(22.dp))
 
             OutlinedButton(
-                onClick = {
-                    ambientError = runCatching { ambientPlayer.toggle() }
-                        .fold(
-                            onSuccess = { playing ->
-                                ambientOn = playing
-                                null
-                            },
-                            onFailure = { error ->
-                                ambientOn = false
-                                "环境音轨播放失败：${error.message ?: "unknown"}"
-                            },
-                        )
-                },
+                onClick = { playback.toggleAmbient() },
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.outlinedButtonColors(
@@ -224,16 +260,8 @@ fun DreamGuardScreen() {
                 ),
             ) {
                 Text(
-                    text = if (ambientOn) "关闭环境音轨（Media3）" else "播放环境音轨（Media3）",
+                    text = if (ambientEnabled) "关闭环境音轨（Media3）" else "播放环境音轨（Media3）",
                     fontSize = 14.sp,
-                )
-            }
-            ambientError?.let { message ->
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = message,
-                    color = MaterialTheme.colorScheme.error,
-                    fontSize = 12.sp,
                 )
             }
 

@@ -12,10 +12,37 @@ class PlaybackController(
     var settings: AudioSettings = initialSettings.sanitized()
         private set
 
+    // Engine callbacks arrive on the render thread while the UI reads these on
+    // main, so both flags must be safe to publish across threads.
+    @Volatile
     var isRunning: Boolean = false
         private set
 
+    @Volatile
     var lastError: String? = null
+        private set
+
+    /**
+     * True when the last [start] was rejected because the previous render thread was
+     * still shutting down. That is not a failure: the engine is healthy, it simply
+     * needs a moment, so the service retries with a bound and the UI can offer an
+     * explicit "play" again instead of silently dropping the user's choice.
+     */
+    @Volatile
+    var retryableStart: Boolean = false
+        private set
+
+    /** Classification of [lastError]; [EngineFailureKind.NONE] for a deferred start. */
+    @Volatile
+    var failureKind: EngineFailureKind = EngineFailureKind.NONE
+        private set
+
+    /**
+     * Incremented once for every engine failure report, so observers (the service)
+     * can react exactly once per failure instead of on every unrelated update.
+     */
+    @Volatile
+    var engineFailureCount: Int = 0
         private set
 
     /** Called after every state or settings change; the UI replaces this. */
@@ -27,7 +54,35 @@ class PlaybackController(
     val engineState: EngineState
         get() = engine.state
 
+    init {
+        // The render thread can fail (or be torn down) long after start() returned, so
+        // the controller mirrors engine state instead of trusting its own flag.
+        engine.onStateChanged = { syncWithEngine() }
+    }
+
+    private fun syncWithEngine() {
+        when (engine.state) {
+            EngineState.RUNNING -> {
+                isRunning = true
+                lastError = null
+                retryableStart = false
+                failureKind = EngineFailureKind.NONE
+            }
+            EngineState.ERROR -> {
+                isRunning = false
+                retryableStart = false
+                lastError = engine.lastFailure ?: "Audio engine stopped unexpectedly."
+                failureKind = engine.failureKind
+                engineFailureCount++
+            }
+            EngineState.STOPPED, EngineState.IDLE, EngineState.RELEASED -> isRunning = false
+        }
+        notifyListener()
+    }
+
     fun start(): Boolean {
+        retryableStart = false
+        failureKind = EngineFailureKind.NONE
         if (engine.state == EngineState.RELEASED) {
             return fail("Audio engine has already been released.")
         }
@@ -40,19 +95,50 @@ class PlaybackController(
             fail("Audio engine failed to start: ${error.message ?: "unknown error"}")
             return false
         }
-        isRunning = started
-        lastError = if (started) null else "Audio output could not be opened."
+        // The render thread may fail between engine.start() returning and this line, so
+        // derive the flag from the engine state instead of trusting `started` alone.
+        isRunning = started && engine.state == EngineState.RUNNING
+        when {
+            isRunning -> {
+                lastError = null
+                failureKind = EngineFailureKind.NONE
+            }
+            // A rejection while the old render thread is still exiting is a transient
+            // "try again shortly", not a failure the user caused or must lose data for.
+            !started && engine.state == EngineState.STOPPED -> {
+                lastError = null
+                retryableStart = true
+                failureKind = EngineFailureKind.NONE
+            }
+            else -> {
+                lastError = engine.lastFailure ?: "Audio output could not be opened."
+                failureKind = engine.failureKind
+            }
+        }
         notifyListener()
-        return started
+        return isRunning
+    }
+
+    /**
+     * Drops a deferred start that the caller has given up on (retry bound reached, the
+     * user switched layers, or playback was cancelled). Keeps [lastError] untouched so
+     * the service can replace it with a visible explanation.
+     */
+    fun abandonDeferredStart() {
+        if (!retryableStart) return
+        retryableStart = false
+        notifyListener()
     }
 
     fun stop() {
+        retryableStart = false
         if (!isRunning && engine.state != EngineState.RUNNING) {
             notifyListener()
             return
         }
         runCatching { engine.stop() }
         isRunning = false
+        failureKind = EngineFailureKind.NONE
         notifyListener()
     }
 
@@ -80,8 +166,11 @@ class PlaybackController(
     }
 
     fun release() {
+        engine.onStateChanged = null
         runCatching { engine.release() }
         isRunning = false
+        retryableStart = false
+        failureKind = EngineFailureKind.NONE
         lastError = null
         notifyListener()
     }
@@ -92,6 +181,8 @@ class PlaybackController(
         engineState = engine.state,
         isAvailable = engine.isAvailable,
         lastError = lastError,
+        retryableStart = retryableStart,
+        failureKind = failureKind,
     )
 
     private fun updateSettings(candidate: AudioSettings) {
@@ -128,4 +219,6 @@ data class PlaybackSnapshot(
     val engineState: EngineState,
     val isAvailable: Boolean,
     val lastError: String?,
+    val retryableStart: Boolean = false,
+    val failureKind: EngineFailureKind = EngineFailureKind.NONE,
 )

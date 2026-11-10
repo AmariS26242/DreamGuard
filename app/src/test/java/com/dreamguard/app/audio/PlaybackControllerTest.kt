@@ -3,6 +3,7 @@ package com.dreamguard.app.audio
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -98,5 +99,162 @@ class PlaybackControllerTest {
         assertFalse(controller.start())
         assertFalse(controller.isRunning)
         assertNotNull(controller.lastError)
+    }
+
+    @Test
+    fun `asynchronous render failure clears running and reports the engine message`() {
+        val engine = FakeAudioEngine()
+        val controller = PlaybackController(engine)
+        var notifications = 0
+        controller.listener = { notifications++ }
+
+        assertTrue(controller.start())
+        engine.failAsync("Audio output rejected the block (-3)")
+
+        assertFalse(controller.isRunning)
+        assertEquals("Audio output rejected the block (-3)", controller.lastError)
+        assertEquals(EngineState.ERROR, controller.snapshot().engineState)
+        assertTrue(notifications >= 2)
+    }
+
+    @Test
+    fun `asynchronous stop clears running without inventing an error`() {
+        val engine = FakeAudioEngine()
+        val controller = PlaybackController(engine)
+
+        assertTrue(controller.start())
+        engine.stopAsync()
+
+        assertFalse(controller.isRunning)
+        assertNull(controller.lastError)
+    }
+
+    @Test
+    fun `restart after a render failure clears the error`() {
+        val engine = FakeAudioEngine()
+        val controller = PlaybackController(engine)
+
+        assertTrue(controller.start())
+        engine.failAsync("Audio output rejected the block (-3)")
+        assertFalse(controller.isRunning)
+        assertNotNull(controller.lastError)
+
+        assertTrue(controller.start())
+
+        assertTrue(controller.isRunning)
+        assertNull("a successful restart must not keep the old error", controller.lastError)
+    }
+
+    @Test
+    fun `each engine failure is counted once`() {
+        val engine = FakeAudioEngine()
+        val controller = PlaybackController(engine)
+        assertEquals(0, controller.engineFailureCount)
+
+        assertTrue(controller.start())
+        engine.failAsync("first failure")
+        assertEquals(1, controller.engineFailureCount)
+
+        assertTrue(controller.start())
+        engine.failAsync("second failure")
+        assertEquals(2, controller.engineFailureCount)
+
+        controller.stop()
+        assertEquals("a normal stop is not a failure", 2, controller.engineFailureCount)
+    }
+
+    @Test
+    fun `release detaches the engine callback so late failures are ignored`() {
+        val engine = FakeAudioEngine()
+        val controller = PlaybackController(engine)
+
+        controller.release()
+        engine.failAsync("late failure")
+
+        assertFalse(controller.isRunning)
+        assertNull(controller.lastError)
+    }
+
+    @Test
+    fun `a deferred start is retryable and is not reported as a failure`() {
+        val engine = FakeAudioEngine(startDeferred = true)
+        val controller = PlaybackController(engine)
+
+        assertFalse(controller.start())
+
+        assertFalse(controller.isRunning)
+        assertTrue("the service cannot tell it should retry", controller.retryableStart)
+        assertNull("a deferred start must not look like an error", controller.lastError)
+        assertEquals(EngineFailureKind.NONE, controller.failureKind)
+        assertEquals("a deferred start is not an engine failure", 0, controller.engineFailureCount)
+        assertTrue(controller.snapshot().retryableStart)
+        assertEquals(EngineFailureKind.NONE, controller.snapshot().failureKind)
+    }
+
+    @Test
+    fun `abandoning a deferred start clears it and notifies once`() {
+        val engine = FakeAudioEngine(startDeferred = true)
+        val controller = PlaybackController(engine)
+        var notifications = 0
+        controller.listener = { notifications++ }
+        assertFalse(controller.start())
+        val beforeAbandon = notifications
+
+        controller.abandonDeferredStart()
+
+        assertFalse(controller.retryableStart)
+        assertTrue("the UI was not told the retry window closed", notifications > beforeAbandon)
+
+        val afterAbandon = notifications
+        controller.abandonDeferredStart()
+        assertEquals("nothing left to abandon", afterAbandon, notifications)
+    }
+
+    @Test
+    fun `a successful start clears a previous deferred start`() {
+        val engine = FakeAudioEngine(startDeferred = true)
+        val controller = PlaybackController(engine)
+        assertFalse(controller.start())
+        assertTrue(controller.retryableStart)
+
+        engine.startDeferred = false
+        assertTrue(controller.start())
+
+        assertTrue(controller.isRunning)
+        assertFalse(controller.retryableStart)
+        assertNull(controller.lastError)
+        assertEquals(EngineFailureKind.NONE, controller.failureKind)
+    }
+
+    @Test
+    fun `stop clears a deferred start`() {
+        val engine = FakeAudioEngine(startDeferred = true)
+        val controller = PlaybackController(engine)
+        assertFalse(controller.start())
+        assertTrue(controller.retryableStart)
+
+        controller.stop()
+
+        assertFalse(controller.retryableStart)
+        assertFalse(controller.isRunning)
+        assertEquals(EngineState.STOPPED, controller.snapshot().engineState)
+    }
+
+    @Test
+    fun `the failure kind is copied from the engine`() {
+        val engine = FakeAudioEngine()
+        val controller = PlaybackController(engine)
+        assertTrue(controller.start())
+
+        engine.failAsync("Audio output could not be opened.", EngineFailureKind.TRANSIENT)
+
+        assertEquals(EngineFailureKind.TRANSIENT, controller.failureKind)
+        assertEquals(EngineFailureKind.TRANSIENT, controller.snapshot().failureKind)
+
+        // A permanent failure must stay distinguishable so the UI/service never
+        // pretends that re-selecting the same output can work.
+        assertTrue(controller.start())
+        engine.failAsync("Native renderer returned 0 frames.", EngineFailureKind.PERMANENT)
+        assertEquals(EngineFailureKind.PERMANENT, controller.snapshot().failureKind)
     }
 }
