@@ -1,6 +1,6 @@
 # DreamGuard 任务状态台账
 
-更新日期：2026-11-10（**第二十四轮：API 35 x86_64 模拟器安装当前 Debug APK，验证播放状态与“本地压缩就绪”**。主代理在代码提交 `4b7ace322da31f06417f3dc09a591795ba14207f`（短 `4b7ace3`）推送后，新做模拟器安装/启动，系统文件选择器选中合成的 **40 s / 44.1 kHz / 单声道 PCM16 WAV**；UI 显示播放中与“本地压缩就绪”，打开处理开关后 `checked=true`；MediaSession `PLAYING`，进程存活，`AndroidRuntime:E` 日志未见 `FATAL EXCEPTION`/`UnsatisfiedLinkError`。**边界**：只证明应用播放状态与 native 处理器准备就绪（`NativeState.READY`，库加载/句柄创建未报错），**不证明**逐块调用 `nativeProcess`、实际音频输出电平、听感、延迟/underrun、泄漏或真机通过；真机新版压缩与 30 分钟长稳未测（用户要求延后）。DG-021/022/023 仍 `IN_PROGRESS`，DG-020/013 仍 `DONE` 不标 `VERIFIED`。**第二十三轮代码已随 `4b7ace3` 提交并推送；第二十四轮日志/状态更新未提交**。**第二十三轮：DG-022 契约修正、Debug 构建与原生测试实测**。对照 media3 1.5.1 官方源码逐项复核 `BaseAudioProcessor`：其 `onFlush()` 返回 **void**，第二十二轮写成 `override fun onFlush(): Boolean` 会**编译失败**，已改为 Unit；`flush()` 由基类先清空待输出并把 pending format 写入 `inputAudioFormat`，因此新增的 `LocalAudioProcessorTest` 中“flush 后 output 为空”不是靠返回值。句柄生命周期改为：`onConfigure()` 只记录 pending 格式、**不碰**在用的 native 句柄；`onFlush()` 才在格式真正生效时创建/替换句柄，同格式 flush 只 reset 压缩机 —— 这样 media3 明确允许的“configure 之后、flush 之前仍可排队旧格式 buffer”窗口内，旧 buffer 仍使用旧句柄（新增测试断言该窗口）。`nativeCapable` 纳入 `nativeError` 判定，新增 `layoutSupported`/`nativeLibraryAvailable`/`nativeFailure`；格式提示在开关关闭时也会明示多声道/缺库/失败直通；已开启的开关始终可关闭（避免失败后 UI 把用户锁在“开”状态）；回退时同时回卷 input position；`close()` 终止并关闭处理。C++ 测试 24→**27 组**（bypass 不改变压缩器状态、立体声残帧、输出容量大于输入），C 头兼容已含 PCM16 纯 C 段（本轮未单独编译/报告）；JVM 测试 17→**18 个**。主代理交叉编译又发现 `dg_compressor_process` 输出参数类型不一致（`dg_pcm_view` vs `dg_pcm_buffer`），已把 compressor 输出改为 `dg_pcm_buffer` 并同步测试、删除残留 `const_cast`。**主代理实测（第二十三轮）**：`.\gradlew.bat --no-daemon --offline :app:testDebugUnitTest :app:assembleDebug` 成功，**80 JVM tests / 0 failures / 0 skipped**，Debug NDK 三个 ABI 编译通过；Android API 35 x86_64 模拟器交叉编译并运行 `dg_pcm16_processor_tests` **206 checks / 0 failures**、`dg_compressor_tests` **348 checks / 0 failures**；首轮 native 类型错误已修。**边界**：本轮**未运行 APK 的模拟器/真机播放**，JVM JNI 合约与 mock **不等于**实测 JNI；未做 true peak、长时间听感、多设备、真实音频输出；用户明确长时间真机测试暂缓。**第二十三轮代码已随 `4b7ace3` 提交并推送；第二十四轮日志/状态更新未提交**。DG-022/023 仍 `IN_PROGRESS`，DG-020 仍 `DONE` 不标 `VERIFIED`。**第二十二轮：DG-022 功能构建——本地 PCM16 经 JNI 进入 native C++ 压缩器**。新增 `dsp-core/include/dreamguard/pcm16_processor.h` + `src/pcm16_processor.cpp`（PCM16→float→DG-013 compressor→PCM16；512 帧定长 scratch、处理路径无逐样本分配、bit-exact bypass、残帧/奇数字节原样、饱和量化、无 lookahead）；新增 JNI surface `NativePcmProcessor`（5 符号，独立契约测试）；`LocalAudioProcessor` 改为 native 主路径，开关关闭或 native 库缺失/句柄失败/处理失败/多声道/非 direct buffer 时逐字节回退，`nativeState` 与 UI 文案可见；`PlaybackService.onDestroy` 在 `player.release()` 后 `close()` 释放句柄。测试：新增 C++ `dg_pcm16_processor`（24 组）与 JVM `LocalAudioProcessorTest`（17 个，fake 后端）+ `NativePcmProcessorContractTest`（4 个）。**边界**：本会话命令环境仍不可用（任何命令返回 `SetNamedSecurityInfoW failed (Win32 5): grantWrite(E:\DreamGuard)`），以上代码与测试在该轮未执行；第二十三轮主代理已补构建/测试（结果见开头），但仍**未运行设备播放**、未验证真实 JNI 与听感；不声称 native 真处理已在设备上通过、不声称真机已验证新版本、不声称 limiter/true peak；DG-020/022 仍不标 `VERIFIED`，DG-022 仍 `IN_PROGRESS`。**第二十一轮：iQOO Z9T 真机本地音频验证**——主代理在 iQOO Z9T（ADB model `V2352A`、manufacturer `vivo`、Android 16 / API 36）安装当前 Debug APK 成功：`versionName 0.1.0`、`versionCode 1`、SHA256 `3ABD75F122320CCE3A7BD1BD493FE6B0A867C1B8996296DD6E44621C8F4C97D2`，启动进程 pid **22780**；该 APK 与此前同批构建、**68 tests / 0 failures / 0 skipped** 的 JVM 结果对应（本轮未重新构建）。用户在 Downloads 用系统选择器打开主代理生成的 **40 s / 44100 Hz / 单声道 PCM16 WAV**，对“声音、−6 dB 开关变化、暂停恢复、爆音卡顿”的**合并询问**统一答复“**正常**”；另答复锁屏约 **15 秒**声音持续、播放其他媒体后 DreamGuard 暂停；关闭本地音轨后原有 DSP 声景正常播放，调音量/音色、暂停正常且无爆音卡顿。日志侧：进程存活、MediaSession `PAUSED`，过滤 `AndroidRuntime:E` 与 `nativeloader` 未见 `FATAL EXCEPTION` 或 `UnsatisfiedLinkError`；**未取得明确的 nativeloader 成功行**，以实际声景出声为间接证据。**边界**：不把“正常”逐项扩展成更细的听感结论；C++ PCM DSP **仍未接入**（−6 dB 是 Kotlin 整数增益，不是 C++ 压缩器/限幅器）；本次**未执行** 30 分钟长稳、蓝牙/有线/外放等多路由、多格式（仅 44.1 kHz 单声道 PCM16）、进程重建、真实峰值测量。按“交付物全部完成”口径，DG-021/022/023 仍记 `IN_PROGRESS`，不标 `DONE`/`VERIFIED`。第二十轮：**主代理真实验证**——`.\gradlew.bat --no-daemon :app:testDebugUnitTest --rerun-tasks :app:assembleDebug` 成功，**68 tests / 0 failures / 0 skipped**；Android API 35 x86_64 模拟器安装启动，系统文件选择器从 Downloads 选取合成 40 s / 44.1 kHz / 单声道 PCM16 WAV，UI 显示文件名、`16-bit PCM · 44100 Hz · 1 ch`、播放中，MediaSession `PLAYING`；打开 −6 dB 开关后 `checked=true`，暂停 UI 显示已暂停，恢复后 MediaSession `PLAYING`，无 `AndroidRuntime FATAL` 输出。**模拟器无音频输出，未听感、未真机、未实证输出波形**；当前 Kotlin 基础 −6 dB **不是** C++ 压缩器/限幅器，DSP Core 未接入。故 DG-021/022/023 仍记 `IN_PROGRESS`，只登记已实际执行的证据与剩余项。第十九轮：**本地音频最小闭环代码落地**——系统文件选择器（`ACTION_OPEN_DOCUMENT` + 持久化读授权）、复用现有 `ExoPlayer` 的本地文件播放/暂停/恢复、`LocalAudioProcessor`（`BaseAudioProcessor` 子类：16-bit PCM 逐样本 −6 dB 整数减半、bypass 逐字节 bit-exact、格式协商/flush/reset/EOS）、`LocalAudioRenderersFactory`（`DefaultAudioSink.Builder.setAudioProcessors` 注入）、最小 UI（本地音频卡 / 处理开关 / 格式提示 / 错误复用）与 10 个 JVM 测试。**本会话 pwsh 仍在启动阶段失败，构建、单测、真机、听感均未执行**，代码只经静态核对，故 DG-021/022/023 记 `IN_PROGRESS`；DG-020 沿用现有 9 符号桥、本轮无新增 JNI。第十八轮：①DG-012 高精度对照完成——主代理用 `ebur128=metadata=1` 对同一批 16 个 WAV 真实执行，**14 个可比样本 14 PASS / 0 FAIL / 0 SKIP，worst |delta| 0.010 LU**；2 例静音/0.3 s 判 **NO-DATA**（−70.000 是 `ABS_THRES` 哨兵，所有 M 块 < −70），**单列不计通过**；metadata 受 FFmpeg 0.01 LU 直方图量化约束，三位小数只是格式；DG-012 记 `DONE`、不标 `VERIFIED`；该 PASS 仅是相对 FFmpeg 9.0.2 metadata、在约 0.01 LU 分辨率下的通过，不构成标准认证。第十七轮：DG-014 峰值限制器的头文件、实现、测试与构建接线已写入；主代理实测 NDK x86_64 模拟器 **dg_limiter 2113 checks / 0 failures**，Gradle `testDebugUnitTest assembleDebug assembleRelease` 成功、三个 ABI 构建通过、JVM `up-to-date`；仅保证 sample peak，**未做过采样 true-peak 测量**，无真机/听感，代码未接入播放链路，故仍为 `IN_PROGRESS`。第十六轮：DG-012 高精度 metadata 脚本由主代理执行两次，均在 ffmpeg probe 处 exit 3（同一 ffmpeg 手工 `-version` 成功）：第一次是 `Select-Object -First 1` 提前终止管道，第二次是版本正则的 `$` 在 Windows CRLF 下不匹配；已修为完整捕获 + 真实 exit code + 无行锚点的全文版本行搜索，**修复后尚未重跑，无新报告**。第十五轮：**参考对照首次真实执行**——主代理用预生成模式对同一批 16 个 WAV 调用 FFmpeg 9.0.2 `ebur128`，得 **14 PASS / 2 FAIL / 0 SKIP，最大绝对差 0.049 LU（`stereo_10kHz_-20dB_48k`），整体 exit 1**。两项 FAIL 都是 `kind=undefined` 的定义问题（2 s 数字静音、0.3 s 短于一个 400 ms 块）：我方 `integrated_ready=0` 且 `integrated=-inf`，ffmpeg 打印 **−70.0**——按 FFmpeg 源码该值是 `ABS_THRES` 哨兵而不是测量结果（`libavfilter/f_ebur128.c`：`#define ABS_THRES -70`；`init()` 里 `ebur128->integrated_loudness = ABS_THRES;`；`filter_frame()` 只在某个 400 ms 块 `loudness_400 >= ABS_THRES` 且 `nb_integrated > 0` 时才覆盖它，静音时该块为 −120.7 LUFS、0.3 s 时 400 ms 缓存根本没填满，于是字段停在初值），因此两项**保持未通过 / 需人工裁定**，不放宽、不改判、不改核心实现。同时登记精度事实：ffmpeg 汇总行是 `I: %5.1f LUFS`，分辨率只有 **0.1 LU**，0.049 LU 与打印取整同量级，0.1 LU 容差只等于 1 个量化步。DG-012 仍 `IN_PROGRESS`、LUFS 仍 `PROVISIONAL`；DG-013 是独立的压缩器测试链（348/0、无听感/真机证据、未接播放），不受本轮影响。第十四轮：①`dg_lufs_compare --selfcheck` 修正后由主代理重跑，**115 checks / 0 failures**（比修前多 2 条，正是新增的静音段 `momentary`/`isfinite` 检查，计数变化本身就是“跑的是新二进制”的证明），DG-012 的**工具自检**首次全绿。②对照侧出现现实条件：FFmpeg **9.0.2** 已位于 `dsp-core/build/reference-deps/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v9.0.2.exe`（仅构建目录内，非系统安装）；但本机无 Windows C++ 编译器，故 `compare_with_ffmpeg.ps1` 新增**预生成输入模式**（`-Csv` + `-WavDir`，直接吃“NDK 编译的 Android 工具在模拟器上生成的 CSV + WAV，再 `adb pull` 回来”的产物，保留原生工具模式），并把静音/0.3 s 两类用例改为**定义问题**处理（`kind=undefined`：双方都无值记 `SKIP` 且**不计入通过**，我方给出数值或参考给出数值则 `FAIL`，绝不静默通过），报告新增 CSV/WAV 的 SHA256 与同名 `.csv` 副产物，且明确**不删除任何输入文件**。本会话 `pwsh` 仍在启动阶段失败，**一次对照都没跑**，`reference-report.md` 尚不存在 ⇒ DG-012 仍 `IN_PROGRESS`、LUFS 仍 `PROVISIONAL`。第十三轮：两件真实验证——①DG-013 重跑得 **348 checks / 0 failures**，扩展后的 `dg_header_c_compat` PASSED，Gradle `testDebugUnitTest assembleDebug assembleRelease` 成功、Debug/Release 三 ABI 构建通过、JVM `up-to-date`；压缩器的信号级验收达成，但**无听感、无真机、未接入播放链路**，故登记 `DONE` 而**不标 `VERIFIED`**。②DG-012 的对照工具 `dg_lufs_compare --selfcheck` 首次由主代理用 NDK x86_64 编译并在 API 35 模拟器执行，得 **113 checks / 1 failure**：`mono_levelstep_4s_1s_2s_48k: expected >= 60 blocks above the absolute gate`。根因是**工具自身的信号生成缺陷**（`fill_sine` 乘的是 case 的 −20 dBFS 电平，把 −50 dB 当相对比例传入，安静段实际落到 −70 dBFS，整段掉到 −70 LUFS 绝对门以下），本会话已改为绝对 −50 dBFS（与 `tests/test_lufs.cpp` 的 gating 用例同一构造），并新增“安静段 `momentary` 等于解析值”的检查以防同类错误复现；**修正后待重跑**，DG-012 仍 `IN_PROGRESS`、LUFS 仍 `PROVISIONAL`，与 ffmpeg/libebur128 的对照依旧零执行。第十二轮：DG-013 首次真实运行——主代理在 NDK x86_64 + API 35 模拟器上跑出 **334 checks / 2 failures**；两处失败经分析**均为测试期望错误**（`output_peak_db` 是“整块峰值，含 attack”，被错当稳态值；浮点样本无法恰好落在阈值上），已按解析值改写测试、新增“明确低于阈值 bitwise 0”与“double 精确阈值”检查，**修正后待重跑**，DG-013 仍只登记 `IN_PROGRESS`。第十一轮：主代理首次在 **NDK x86_64 真实编译** DG-013 测试即**失败**——`compressor.h:161` 报 `warning: '/*' within block comment`，声明被注释吞掉后引发多处 `use of undeclared identifier 'dg_compressor_process'`。根因是本会话第十轮合并 `dg_compressor_process` 注释时漏掉注释结尾 `*/`，已修复（补回 `*/` 并复核头文件全部注释闭合）；修正后**尚待主代理重测**，DG-013 仍只登记 `IN_PROGRESS`，压缩器仍未接入播放链路。第十轮：按用户授权推进 DG-013 最小压缩器——新增 `dsp-core/include/dreamguard/compressor.h`、`dsp-core/src/compressor.cpp`、`dsp-core/tests/test_compressor.cpp`（16 组）、CMake 接线与 C 头兼容冒烟。第十轮本会话 `pwsh` 仍在启动阶段报同一 ACL 错误，这三个文件从未在本会话编译、运行。DG-012 的对照工具链同样仍未执行，DG-012 保持 `IN_PROGRESS`、LUFS 仍 `PROVISIONAL`。第九轮：写好 DG-012 的参考工具对照工具链但**未执行**——新增 `dsp-core/tools/lufs_compare/`（`dg_lufs_compare` 16 例确定性合成信号 + `--wav-dir/--csv/--selfcheck/--libebur128`、`compare_with_ffmpeg.ps1` 驱动 ffmpeg `ebur128` 并按 0.1 LU 判定、CTest `dg_lufs_compare`），本会话 `pwsh` 仍在启动阶段报同一 ACL 错误，无法编译/运行/跑 ffmpeg，因此**零个对照数字**被登记，DG-012 保持 `IN_PROGRESS`、LUFS 仍 `PROVISIONAL`。第八轮：主代理复测修复后的 DG-012——`dg_lufs` **238 checks / 0 failures**（gating 诊断 `blocks=67 after_abs=61 used=40 integrated=-23.1696`）、`dg_meter` 207/0、扩展后的 `dg_header_c_compat` PASSED；Gradle `testDebugUnitTest assembleDebug assembleRelease` 成功，Debug/Release 三 ABI 均已构建；JVM `up-to-date`。第七轮曾首跑得 227/2，两处失败为 gating 用例漏算单声道 −3.0103 LU 的测试期望错误，已修正。第五轮由主代理复测别名修正代码：Gradle 构建成功、PCM 测试 **139 checks / 0 failures**，DG-011 为 `DONE`，不标 `VERIFIED`）
+更新日期：2026-11-10（**第二十六轮：主代理执行 DG-024 构建与 JVM 单测 → BUILD SUCCESSFUL、92 tests / 0 failures / 0 skipped；API 35 x86_64 模拟器安装启动，未启动 DreamGuard 声景时页面待机、系统媒体音量 33%（5/15），用音量卡滑块调到 20%（3/15），dumpsys audio 记录 setStreamVolume STREAM_MUSIC index 3 oldIndex 5 from com.dreamguard.app，页面显示 20%**。DG-024 仍 `IN_PROGRESS`：无第三方播放器共存证据、外部音量同步未可靠验证（模拟器 adb 调节未生效）、无固定输出/蓝牙/真机；不声称原生音频实时压缩或单应用音量。**本轮仅更新文档，未提交/推送**。此前第二十五轮：代码与 12 个 JVM 测试写入，当时本会话命令环境不可用、未构建/未运行。此前第二十四轮记录：API 35 x86_64 模拟器安装当前 Debug APK，验证播放状态与“本地压缩就绪”。主代理在代码提交 `4b7ace322da31f06417f3dc09a591795ba14207f`（短 `4b7ace3`）推送后，新做模拟器安装/启动，系统文件选择器选中合成的 **40 s / 44.1 kHz / 单声道 PCM16 WAV**；UI 显示播放中与“本地压缩就绪”，打开处理开关后 `checked=true`；MediaSession `PLAYING`，进程存活，`AndroidRuntime:E` 日志未见 `FATAL EXCEPTION`/`UnsatisfiedLinkError`。**边界**：只证明应用播放状态与 native 处理器准备就绪（`NativeState.READY`，库加载/句柄创建未报错），**不证明**逐块调用 `nativeProcess`、实际音频输出电平、听感、延迟/underrun、泄漏或真机通过；真机新版压缩与 30 分钟长稳未测（用户要求延后）。DG-021/022/023 仍 `IN_PROGRESS`，DG-020/013 仍 `DONE` 不标 `VERIFIED`。**第二十三轮代码已随 `4b7ace3` 提交并推送；第二十四轮日志/状态更新未提交**。**第二十三轮：DG-022 契约修正、Debug 构建与原生测试实测**。对照 media3 1.5.1 官方源码逐项复核 `BaseAudioProcessor`：其 `onFlush()` 返回 **void**，第二十二轮写成 `override fun onFlush(): Boolean` 会**编译失败**，已改为 Unit；`flush()` 由基类先清空待输出并把 pending format 写入 `inputAudioFormat`，因此新增的 `LocalAudioProcessorTest` 中“flush 后 output 为空”不是靠返回值。句柄生命周期改为：`onConfigure()` 只记录 pending 格式、**不碰**在用的 native 句柄；`onFlush()` 才在格式真正生效时创建/替换句柄，同格式 flush 只 reset 压缩机 —— 这样 media3 明确允许的“configure 之后、flush 之前仍可排队旧格式 buffer”窗口内，旧 buffer 仍使用旧句柄（新增测试断言该窗口）。`nativeCapable` 纳入 `nativeError` 判定，新增 `layoutSupported`/`nativeLibraryAvailable`/`nativeFailure`；格式提示在开关关闭时也会明示多声道/缺库/失败直通；已开启的开关始终可关闭（避免失败后 UI 把用户锁在“开”状态）；回退时同时回卷 input position；`close()` 终止并关闭处理。C++ 测试 24→**27 组**（bypass 不改变压缩器状态、立体声残帧、输出容量大于输入），C 头兼容已含 PCM16 纯 C 段（本轮未单独编译/报告）；JVM 测试 17→**18 个**。主代理交叉编译又发现 `dg_compressor_process` 输出参数类型不一致（`dg_pcm_view` vs `dg_pcm_buffer`），已把 compressor 输出改为 `dg_pcm_buffer` 并同步测试、删除残留 `const_cast`。**主代理实测（第二十三轮）**：`.\gradlew.bat --no-daemon --offline :app:testDebugUnitTest :app:assembleDebug` 成功，**80 JVM tests / 0 failures / 0 skipped**，Debug NDK 三个 ABI 编译通过；Android API 35 x86_64 模拟器交叉编译并运行 `dg_pcm16_processor_tests` **206 checks / 0 failures**、`dg_compressor_tests` **348 checks / 0 failures**；首轮 native 类型错误已修。**边界**：本轮**未运行 APK 的模拟器/真机播放**，JVM JNI 合约与 mock **不等于**实测 JNI；未做 true peak、长时间听感、多设备、真实音频输出；用户明确长时间真机测试暂缓。**第二十三轮代码已随 `4b7ace3` 提交并推送；第二十四轮日志/状态更新未提交**。DG-022/023 仍 `IN_PROGRESS`，DG-020 仍 `DONE` 不标 `VERIFIED`。**第二十二轮：DG-022 功能构建——本地 PCM16 经 JNI 进入 native C++ 压缩器**。新增 `dsp-core/include/dreamguard/pcm16_processor.h` + `src/pcm16_processor.cpp`（PCM16→float→DG-013 compressor→PCM16；512 帧定长 scratch、处理路径无逐样本分配、bit-exact bypass、残帧/奇数字节原样、饱和量化、无 lookahead）；新增 JNI surface `NativePcmProcessor`（5 符号，独立契约测试）；`LocalAudioProcessor` 改为 native 主路径，开关关闭或 native 库缺失/句柄失败/处理失败/多声道/非 direct buffer 时逐字节回退，`nativeState` 与 UI 文案可见；`PlaybackService.onDestroy` 在 `player.release()` 后 `close()` 释放句柄。测试：新增 C++ `dg_pcm16_processor`（24 组）与 JVM `LocalAudioProcessorTest`（17 个，fake 后端）+ `NativePcmProcessorContractTest`（4 个）。**边界**：本会话命令环境仍不可用（任何命令返回 `SetNamedSecurityInfoW failed (Win32 5): grantWrite(E:\DreamGuard)`），以上代码与测试在该轮未执行；第二十三轮主代理已补构建/测试（结果见开头），但仍**未运行设备播放**、未验证真实 JNI 与听感；不声称 native 真处理已在设备上通过、不声称真机已验证新版本、不声称 limiter/true peak；DG-020/022 仍不标 `VERIFIED`，DG-022 仍 `IN_PROGRESS`。**第二十一轮：iQOO Z9T 真机本地音频验证**——主代理在 iQOO Z9T（ADB model `V2352A`、manufacturer `vivo`、Android 16 / API 36）安装当前 Debug APK 成功：`versionName 0.1.0`、`versionCode 1`、SHA256 `3ABD75F122320CCE3A7BD1BD493FE6B0A867C1B8996296DD6E44621C8F4C97D2`，启动进程 pid **22780**；该 APK 与此前同批构建、**68 tests / 0 failures / 0 skipped** 的 JVM 结果对应（本轮未重新构建）。用户在 Downloads 用系统选择器打开主代理生成的 **40 s / 44100 Hz / 单声道 PCM16 WAV**，对“声音、−6 dB 开关变化、暂停恢复、爆音卡顿”的**合并询问**统一答复“**正常**”；另答复锁屏约 **15 秒**声音持续、播放其他媒体后 DreamGuard 暂停；关闭本地音轨后原有 DSP 声景正常播放，调音量/音色、暂停正常且无爆音卡顿。日志侧：进程存活、MediaSession `PAUSED`，过滤 `AndroidRuntime:E` 与 `nativeloader` 未见 `FATAL EXCEPTION` 或 `UnsatisfiedLinkError`；**未取得明确的 nativeloader 成功行**，以实际声景出声为间接证据。**边界**：不把“正常”逐项扩展成更细的听感结论；C++ PCM DSP **仍未接入**（−6 dB 是 Kotlin 整数增益，不是 C++ 压缩器/限幅器）；本次**未执行** 30 分钟长稳、蓝牙/有线/外放等多路由、多格式（仅 44.1 kHz 单声道 PCM16）、进程重建、真实峰值测量。按“交付物全部完成”口径，DG-021/022/023 仍记 `IN_PROGRESS`，不标 `DONE`/`VERIFIED`。第二十轮：**主代理真实验证**——`.\gradlew.bat --no-daemon :app:testDebugUnitTest --rerun-tasks :app:assembleDebug` 成功，**68 tests / 0 failures / 0 skipped**；Android API 35 x86_64 模拟器安装启动，系统文件选择器从 Downloads 选取合成 40 s / 44.1 kHz / 单声道 PCM16 WAV，UI 显示文件名、`16-bit PCM · 44100 Hz · 1 ch`、播放中，MediaSession `PLAYING`；打开 −6 dB 开关后 `checked=true`，暂停 UI 显示已暂停，恢复后 MediaSession `PLAYING`，无 `AndroidRuntime FATAL` 输出。**模拟器无音频输出，未听感、未真机、未实证输出波形**；当前 Kotlin 基础 −6 dB **不是** C++ 压缩器/限幅器，DSP Core 未接入。故 DG-021/022/023 仍记 `IN_PROGRESS`，只登记已实际执行的证据与剩余项。第十九轮：**本地音频最小闭环代码落地**——系统文件选择器（`ACTION_OPEN_DOCUMENT` + 持久化读授权）、复用现有 `ExoPlayer` 的本地文件播放/暂停/恢复、`LocalAudioProcessor`（`BaseAudioProcessor` 子类：16-bit PCM 逐样本 −6 dB 整数减半、bypass 逐字节 bit-exact、格式协商/flush/reset/EOS）、`LocalAudioRenderersFactory`（`DefaultAudioSink.Builder.setAudioProcessors` 注入）、最小 UI（本地音频卡 / 处理开关 / 格式提示 / 错误复用）与 10 个 JVM 测试。**本会话 pwsh 仍在启动阶段失败，构建、单测、真机、听感均未执行**，代码只经静态核对，故 DG-021/022/023 记 `IN_PROGRESS`；DG-020 沿用现有 9 符号桥、本轮无新增 JNI。第十八轮：①DG-012 高精度对照完成——主代理用 `ebur128=metadata=1` 对同一批 16 个 WAV 真实执行，**14 个可比样本 14 PASS / 0 FAIL / 0 SKIP，worst |delta| 0.010 LU**；2 例静音/0.3 s 判 **NO-DATA**（−70.000 是 `ABS_THRES` 哨兵，所有 M 块 < −70），**单列不计通过**；metadata 受 FFmpeg 0.01 LU 直方图量化约束，三位小数只是格式；DG-012 记 `DONE`、不标 `VERIFIED`；该 PASS 仅是相对 FFmpeg 9.0.2 metadata、在约 0.01 LU 分辨率下的通过，不构成标准认证。第十七轮：DG-014 峰值限制器的头文件、实现、测试与构建接线已写入；主代理实测 NDK x86_64 模拟器 **dg_limiter 2113 checks / 0 failures**，Gradle `testDebugUnitTest assembleDebug assembleRelease` 成功、三个 ABI 构建通过、JVM `up-to-date`；仅保证 sample peak，**未做过采样 true-peak 测量**，无真机/听感，代码未接入播放链路，故仍为 `IN_PROGRESS`。第十六轮：DG-012 高精度 metadata 脚本由主代理执行两次，均在 ffmpeg probe 处 exit 3（同一 ffmpeg 手工 `-version` 成功）：第一次是 `Select-Object -First 1` 提前终止管道，第二次是版本正则的 `$` 在 Windows CRLF 下不匹配；已修为完整捕获 + 真实 exit code + 无行锚点的全文版本行搜索，**修复后尚未重跑，无新报告**。第十五轮：**参考对照首次真实执行**——主代理用预生成模式对同一批 16 个 WAV 调用 FFmpeg 9.0.2 `ebur128`，得 **14 PASS / 2 FAIL / 0 SKIP，最大绝对差 0.049 LU（`stereo_10kHz_-20dB_48k`），整体 exit 1**。两项 FAIL 都是 `kind=undefined` 的定义问题（2 s 数字静音、0.3 s 短于一个 400 ms 块）：我方 `integrated_ready=0` 且 `integrated=-inf`，ffmpeg 打印 **−70.0**——按 FFmpeg 源码该值是 `ABS_THRES` 哨兵而不是测量结果（`libavfilter/f_ebur128.c`：`#define ABS_THRES -70`；`init()` 里 `ebur128->integrated_loudness = ABS_THRES;`；`filter_frame()` 只在某个 400 ms 块 `loudness_400 >= ABS_THRES` 且 `nb_integrated > 0` 时才覆盖它，静音时该块为 −120.7 LUFS、0.3 s 时 400 ms 缓存根本没填满，于是字段停在初值），因此两项**保持未通过 / 需人工裁定**，不放宽、不改判、不改核心实现。同时登记精度事实：ffmpeg 汇总行是 `I: %5.1f LUFS`，分辨率只有 **0.1 LU**，0.049 LU 与打印取整同量级，0.1 LU 容差只等于 1 个量化步。DG-012 仍 `IN_PROGRESS`、LUFS 仍 `PROVISIONAL`；DG-013 是独立的压缩器测试链（348/0、无听感/真机证据、未接播放），不受本轮影响。第十四轮：①`dg_lufs_compare --selfcheck` 修正后由主代理重跑，**115 checks / 0 failures**（比修前多 2 条，正是新增的静音段 `momentary`/`isfinite` 检查，计数变化本身就是“跑的是新二进制”的证明），DG-012 的**工具自检**首次全绿。②对照侧出现现实条件：FFmpeg **9.0.2** 已位于 `dsp-core/build/reference-deps/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v9.0.2.exe`（仅构建目录内，非系统安装）；但本机无 Windows C++ 编译器，故 `compare_with_ffmpeg.ps1` 新增**预生成输入模式**（`-Csv` + `-WavDir`，直接吃“NDK 编译的 Android 工具在模拟器上生成的 CSV + WAV，再 `adb pull` 回来”的产物，保留原生工具模式），并把静音/0.3 s 两类用例改为**定义问题**处理（`kind=undefined`：双方都无值记 `SKIP` 且**不计入通过**，我方给出数值或参考给出数值则 `FAIL`，绝不静默通过），报告新增 CSV/WAV 的 SHA256 与同名 `.csv` 副产物，且明确**不删除任何输入文件**。本会话 `pwsh` 仍在启动阶段失败，**一次对照都没跑**，`reference-report.md` 尚不存在 ⇒ DG-012 仍 `IN_PROGRESS`、LUFS 仍 `PROVISIONAL`。第十三轮：两件真实验证——①DG-013 重跑得 **348 checks / 0 failures**，扩展后的 `dg_header_c_compat` PASSED，Gradle `testDebugUnitTest assembleDebug assembleRelease` 成功、Debug/Release 三 ABI 构建通过、JVM `up-to-date`；压缩器的信号级验收达成，但**无听感、无真机、未接入播放链路**，故登记 `DONE` 而**不标 `VERIFIED`**。②DG-012 的对照工具 `dg_lufs_compare --selfcheck` 首次由主代理用 NDK x86_64 编译并在 API 35 模拟器执行，得 **113 checks / 1 failure**：`mono_levelstep_4s_1s_2s_48k: expected >= 60 blocks above the absolute gate`。根因是**工具自身的信号生成缺陷**（`fill_sine` 乘的是 case 的 −20 dBFS 电平，把 −50 dB 当相对比例传入，安静段实际落到 −70 dBFS，整段掉到 −70 LUFS 绝对门以下），本会话已改为绝对 −50 dBFS（与 `tests/test_lufs.cpp` 的 gating 用例同一构造），并新增“安静段 `momentary` 等于解析值”的检查以防同类错误复现；**修正后待重跑**，DG-012 仍 `IN_PROGRESS`、LUFS 仍 `PROVISIONAL`，与 ffmpeg/libebur128 的对照依旧零执行。第十二轮：DG-013 首次真实运行——主代理在 NDK x86_64 + API 35 模拟器上跑出 **334 checks / 2 failures**；两处失败经分析**均为测试期望错误**（`output_peak_db` 是“整块峰值，含 attack”，被错当稳态值；浮点样本无法恰好落在阈值上），已按解析值改写测试、新增“明确低于阈值 bitwise 0”与“double 精确阈值”检查，**修正后待重跑**，DG-013 仍只登记 `IN_PROGRESS`。第十一轮：主代理首次在 **NDK x86_64 真实编译** DG-013 测试即**失败**——`compressor.h:161` 报 `warning: '/*' within block comment`，声明被注释吞掉后引发多处 `use of undeclared identifier 'dg_compressor_process'`。根因是本会话第十轮合并 `dg_compressor_process` 注释时漏掉注释结尾 `*/`，已修复（补回 `*/` 并复核头文件全部注释闭合）；修正后**尚待主代理重测**，DG-013 仍只登记 `IN_PROGRESS`，压缩器仍未接入播放链路。第十轮：按用户授权推进 DG-013 最小压缩器——新增 `dsp-core/include/dreamguard/compressor.h`、`dsp-core/src/compressor.cpp`、`dsp-core/tests/test_compressor.cpp`（16 组）、CMake 接线与 C 头兼容冒烟。第十轮本会话 `pwsh` 仍在启动阶段报同一 ACL 错误，这三个文件从未在本会话编译、运行。DG-012 的对照工具链同样仍未执行，DG-012 保持 `IN_PROGRESS`、LUFS 仍 `PROVISIONAL`。第九轮：写好 DG-012 的参考工具对照工具链但**未执行**——新增 `dsp-core/tools/lufs_compare/`（`dg_lufs_compare` 16 例确定性合成信号 + `--wav-dir/--csv/--selfcheck/--libebur128`、`compare_with_ffmpeg.ps1` 驱动 ffmpeg `ebur128` 并按 0.1 LU 判定、CTest `dg_lufs_compare`），本会话 `pwsh` 仍在启动阶段报同一 ACL 错误，无法编译/运行/跑 ffmpeg，因此**零个对照数字**被登记，DG-012 保持 `IN_PROGRESS`、LUFS 仍 `PROVISIONAL`。第八轮：主代理复测修复后的 DG-012——`dg_lufs` **238 checks / 0 failures**（gating 诊断 `blocks=67 after_abs=61 used=40 integrated=-23.1696`）、`dg_meter` 207/0、扩展后的 `dg_header_c_compat` PASSED；Gradle `testDebugUnitTest assembleDebug assembleRelease` 成功，Debug/Release 三 ABI 均已构建；JVM `up-to-date`。第七轮曾首跑得 227/2，两处失败为 gating 用例漏算单声道 −3.0103 LU 的测试期望错误，已修正。第五轮由主代理复测别名修正代码：Gradle 构建成功、PCM 测试 **139 checks / 0 failures**，DG-011 为 `DONE`，不标 `VERIFIED`）
 
 本文件记录 Phase 0 / Phase 1 已触碰任务的**实际**状态、目标、交付物、验收条件与可核实证据。
 `docs/ROADMAP.md` 定义任务，本文件登记执行结果；两者冲突时以本文件的证据为准。
@@ -11,7 +11,7 @@
 
 | 任务 | 状态 | 证据 |
 | --- | --- | --- |
-| DG-024 第三方媒体音量控制原型 | `TODO` | 尚未实现或测试 |
+| DG-024 第三方媒体音量控制原型 | `IN_PROGRESS` | 第二十六轮主代理实测：`testDebugUnitTest assembleDebug` **BUILD SUCCESSFUL、92 tests / 0 failures / 0 skipped**；API 35 x86_64 模拟器未启动声景时 33%（5/15），音量卡调到 20%（3/15），`dumpsys audio` 记录 `setStreamVolume STREAM_MUSIC index 3 oldIndex 5 from com.dreamguard.app`，页面 20%。无第三方播放器共存、外部同步未可靠验证、无固定输出/蓝牙/真机 |
 | DG-025 睡眠定时与渐弱控制 | `TODO` | 尚未实现或测试 |
 | DG-026 第三方播放共存与最小回归 | `TODO` | 尚未针对该功能执行 |
 | DG-050 外部音频捕获与替换可行性 | `TODO` | 尚未执行实验 |
@@ -47,6 +47,7 @@
 | DG-021 Media3 播放器 | `IN_PROGRESS` | 第二十轮主代理在 Android API 35 x86_64 模拟器安装启动，系统选择器从 Downloads 选 40 s / 44.1 kHz / 单声道 PCM16 WAV；UI 显示文件名、`16-bit PCM · 44100 Hz · 1 ch`、播放中，`dumpsys media_session` 为 `PLAYING`；暂停显示已暂停、恢复后 `PLAYING`。第二十一轮已在 iQOO Z9T（V2352A / vivo / Android 16 API 36）真机安装同批 Debug APK（0.1.0 / versionCode 1 / SHA256 `3ABD75F1…F4C97D2`，pid 22780），用户用系统选择器播放 40 s / 44.1 kHz / 单声道 PCM16 WAV，对声音、−6 dB、暂停恢复、爆音卡顿**合并答复“正常”**；锁屏约 15 s 持续、播其他媒体后暂停。**第二十三轮只构建了 Debug APK，未安装/未运行**；**第二十四轮已安装启动当前 Debug APK，系统选择器选 40 s / 44.1 kHz / mono PCM16 WAV，UI 播放中、MediaSession `PLAYING`、进程存活、`AndroidRuntime:E` 无 FATAL/UnsatisfiedLinkError**；仍无音频输出/波形/听感、播放进度 UI、多格式/多路由/进程重建/30 分钟长稳，故不满足 `DONE` | 第二十轮模拟器记录；**第二十一轮 iQOO Z9T 用户操作记录**（“正常”为合并答复，对应旧 Kotlin −6 dB 链路）；**第二十四轮模拟器播放状态证据（非音频输出）** |
 | DG-022 AudioProcessor | `IN_PROGRESS` | 第二十二轮把 local PCM16 真正接入 C++ 压缩器：`LocalAudioProcessor` 协商 PCM16（1–2 ch 走 native，>2 ch 直通）、native 字节数完全匹配才采用、失败/缺库/非 direct/创建失败全部逐字节回退并置 `ERROR`、`reset`/`close` destroy。**第二十三轮修正**：`onFlush()` 按 media3 1.5.1 真实签名改为 Unit；句柄在 `flush()`（格式生效点）创建/替换，configure 与 flush 之间旧格式仍用旧句柄；失败后开关仍可关闭，格式提示始终明示直通原因；回退回卷输入位置；`close()` 终止处理；compressor 输出类型统一为 `dg_pcm_buffer`。**实测**：80 JVM tests / 0 failures / 0 skipped（含 18 个 `LocalAudioProcessorTest` + 4 个契约测试）、Debug 三 ABI；API 35 x86_64 模拟器 `dg_pcm16_processor_tests` **206 checks / 0 failures**（27 组）。**边界**：第二十三轮未运行 APK；**第二十四轮已安装运行，打开处理开关 `checked=true`，提示“本地压缩就绪”（`READY`）**；未观察到 `ACTIVE`、无逐块日志/波形/录音，仍不证明 `nativeProcess` 调用或实际音频输出；无听感、真机、true peak。验收“真实音频通过 DSP 后正常播放”未满足 | 80 JVM tests + 三 ABI 构建 + 模拟器 206/0 + **第二十四轮 READY 状态**；**无真实音频/设备处理证据** |
 | DG-023 Android 基础 UI | `IN_PROGRESS` | 第二十轮在 API 35 x86_64 模拟器手工走通：文件选择器选 WAV → 显示文件名与格式 → 播放中；处理开关可开（`checked=true`）；暂停显示已暂停、恢复后播放；无 FATAL。第二十一轮在 iQOO Z9T 真机走通“选 40 s WAV → 播放 → −6 dB 开关 → 暂停/恢复 → 关闭回 DSP 声景”，用户答复“正常”、无爆音卡顿；**无截图比对、无波形**，错误路径与进程重建未测；第二十二/二十三轮改了开关与格式提示；**第二十四轮模拟器 UI 显示播放中、格式提示“本地压缩就绪”、开关 `checked=true`**，但仍无截图比对/真实听感/错误路径/进程重建/真机；“自然模式/响度显示”未做 | 第二十轮模拟器记录 + **第二十一轮真机用户操作记录**（对应旧版链路）+ **第二十四轮模拟器 UI 状态证据** |
+| DG-024 第三方媒体音量控制原型 | `IN_PROGRESS` | 第二十五轮写入 `SystemMediaVolume.kt`（纯 Kotlin 范围/固定/失败/通知规则）、`AudioManagerMediaVolume.kt`（`STREAM_MUSIC` 读写 + Settings 观察）、`DreamGuardScreen.kt` 音量卡与 `SystemMediaVolumeTest.kt`（12 个 JVM 测试）。**第二十六轮主代理实测**：`.\gradlew.bat --no-daemon --offline :app:testDebugUnitTest :app:assembleDebug` **BUILD SUCCESSFUL**、**92 tests / 0 failures / 0 skipped**；API 35 x86_64 模拟器安装启动，未启动 DreamGuard 声景时页面待机、系统媒体音量 33%（5/15），用音量卡滑块调到 20%（3/15），`dumpsys audio` 记录 `setStreamVolume STREAM_MUSIC index 3 oldIndex 5 from com.dreamguard.app`，页面显示 20%。**仍缺**：第三方播放器共存/不被打断、实际声音电平、外部音量变化同步（模拟器 adb 调节未生效）、边界/固定输出/蓝牙/真机。故仍 `IN_PROGRESS`，不标 `DONE`/`VERIFIED` | 主代理 Gradle 输出 + 92/0 报告 + API 35 x86_64 模拟器记录；**无第三方播放器/真机证据** |
 
 ---
 
@@ -1016,7 +1017,91 @@ UI 报的是 `READY`（未观察到 `ACTIVE`），无逐块日志/波形/录音�
 测试，也没有真机验证；“自然模式/响度显示”仍是后续项（本轮的开关是处理 bypass，不是自然模式）。
 验收“完整本地播放闭环”只在模拟器 UI 层面部分满足，故仍 `IN_PROGRESS`。
 
-**明确不声称**：没有实现、也没有声称任何第三方媒体音量控制；第二十一轮已有 iQOO Z9T 真机用户操作与“正常”听感答复，但不据此声称任何第三方音量控制或量化音质。
+**明确不声称**：本任务（基础 UI）原不包含第三方媒体音量控制；第二十五轮新增的 DG-024 系统媒体音量卡是独立范围，
+第二十六轮已完成构建与 **92/0** JVM 测试、并做了模拟器基础音量验证，但尚无第三方播放器/真机证据（见下节）；
+不把该卡计入本任务验收，也不声称任何第三方音频捕获、按应用分流或动态压缩。
+
+---
+
+## DG-024 第三方媒体音量控制原型
+
+**目标**（`docs/ROADMAP.md`）：第三方媒体应用播放时，用户可在 DreamGuard 查看并调节系统媒体音量，
+且不因打开控制区而启动/暂停第三方播放器或申请音频焦点。
+
+**第二十五轮交付物（2026-11-10 写入；本会话未编译、未运行）**
+
+- `app/src/main/java/com/dreamguard/app/audio/SystemMediaVolume.kt`：纯 Kotlin 控制核心，无 Android 类型。
+  - `MediaVolumeBackend` 抽象读/写；`SystemVolumeSnapshot` 携带 `isAvailable` / `isFixed` / `minIndex` /
+    `maxIndex` / `currentIndex`，`isAdjustable` 只在“可读 + 非固定 + `max > min`”时为真；
+    `fraction` / `percent` 按平台真实索引范围计算，不假设固定档数。
+  - `SystemVolumeController.setIndex` 把请求钳制到 `[min, max]`；固定设备返回 `FIXED` 且**不写**；
+    范围不可读或单级输出返回 `UNAVAILABLE`；写入抛异常返回 `FAILED`；写后**重新读取**，
+    平台静默忽略写入时返回 `FAILED` 而不是假成功。
+  - `refresh()` 只在快照真正变化时通知监听器（外部音量键/系统面板/其他应用的变更与自身写入共用一条路径；
+    重复的设置回调不会造成 UI 抖动）。
+- `app/src/main/java/com/dreamguard/app/audio/AudioManagerMediaVolume.kt`：
+  - `AudioManagerVolumeBackend` 只操作 **`STREAM_MUSIC`**：`getStreamVolume` / `getStreamMaxVolume` /
+    `getStreamMinVolume`（API 28+，以下回退 0）/ `setStreamVolume(..., 0)` / `isVolumeFixed`。
+    **未新增任何权限**（无 `WRITE_SETTINGS`、无录音、无网络）；**没有 `requestAudioFocus` 调用**。
+  - `SystemVolumeObserver` 观察公开的 `content://settings/system` 表，用于硬件键/系统面板/其他应用
+    引起的外部音量变化；注册失败只降级为“无实时外部回调”，不崩溃，界面在 ON_START 与每次写入后仍会重读。
+- `app/src/main/java/com/dreamguard/app/ui/DreamGuardScreen.kt`：
+  - 新增“系统媒体音量”卡：百分比、最小/最大索引、按平台档位分级的滑块、固定/单级/读失败/写失败文案与“重试”。
+  - 文案明确“调节的是系统媒体音量通道（STREAM_MUSIC），会影响所有使用该通道的应用，不是只调 DreamGuard
+    或某一个播放器；调整不会启动、暂停或抢占第三方播放器的音频焦点”。
+  - 生命周期：`ON_START` 注册观察者并刷新，`ON_STOP` 反注册，`onDispose` 移除生命周期观察者、反注册、
+    清空 listener；Composition 晚于 `ON_START` 时也立即补一次注册，避免漏掉生命周期事件。
+  - 音量卡在播放服务尚未连接时也渲染，**不依赖 DSP/Media3 播放**；打开应用不会自动开始播放。
+  - 原 DSP 增益卡标题从“音量”改为“声景音量”，避免与系统媒体通道混淆。
+- `app/src/test/java/com/dreamguard/app/audio/SystemMediaVolumeTest.kt`：**12 个 JVM 测试**，覆盖
+  范围读取/越界回读钳制/写入钳制、固定音量设备只读且不写、单级输出、读失败降级、写异常、
+  平台静默忽略写入、外部变化只通知一次且空刷新不通知、成功写入发布新值、失败写入不发布假值、读失败恢复。
+
+**第二十六轮执行证据（主代理在本机 / API 35 x86_64 模拟器执行；本会话只登记，未运行命令）**
+
+- 构建与测试：`.\gradlew.bat --no-daemon --offline :app:testDebugUnitTest :app:assembleDebug`
+  → **BUILD SUCCESSFUL**；测试报告 **92 tests / 0 failures / 0 skipped**。
+- 模拟器：安装并启动成功；**未启动 DreamGuard 声景**，页面待机、系统媒体音量 **33%（5/15）**；
+  用“系统媒体音量”卡滑块调到 **20%（3/15）**，`dumpsys audio` 记录
+  `setStreamVolume STREAM_MUSIC index 3 oldIndex 5 from com.dreamguard.app`，页面显示 **20%**。
+- **能证明**：Debug 构建与 JVM 测试通过；不播放 DreamGuard 时音量卡能读取并写入真实 `STREAM_MUSIC`
+  通道；系统音频服务接受了这次写入（oldIndex 5 → index 3）；界面与系统索引一致。
+- **不能证明**：第三方播放器共存或不被打断、实际声音电平/听感变化、外部音量变化同步
+  （模拟器上用 adb 调节没有生效，未可靠验证）、音量边界与固定音量/单级输出 UI、蓝牙/固定输出设备、
+  iQOO Z9T 真机、音频焦点行为；也不证明原生音频被实时压缩或只影响单个应用。
+
+**已执行命令（主代理；供复核）**
+
+```powershell
+.\gradlew.bat --no-daemon --offline :app:testDebugUnitTest :app:assembleDebug
+adb install -r app\build\outputs\apk\debug\app-debug.apk
+adb shell am start -n com.dreamguard.app/.MainActivity
+adb shell dumpsys audio | findstr /i "STREAM_MUSIC"
+```
+
+**下一轮需要补的验证**
+
+- 让指定第三方播放器持续播放，拖动音量卡确认系统音量与实际声音变化、播放器不暂停；记录播放器及版本。
+- 用音量键/系统面板/其他应用改变音量，确认真实设备上界面跟随（本轮 adb 调节未生效，不能据此判定）。
+- 覆盖 0/最大值、固定音量或单级输出、蓝牙/有线/外放；最后在 iQOO Z9T 真机执行 DG-026。
+- 对“未申请音频焦点”做设备侧记录（本次未记录 focus stack 检查结果）。
+
+**回归边界**：本轮**未修改** `PlaybackService`、`PlaybackController`、DSP、`LocalAudioProcessor` 或
+播放服务默认行为；改动是新增文件、在 `DreamGuardScreen` 插入音量卡（服务未连接分支也放一张）、把原 DSP
+增益卡标题“音量”改成“声景音量”。主代理已跑 **92/0** 并完成一次“安装启动 + 不播放时调音量”的冒烟，
+但**没有**启动 DreamGuard 声景、没有本地音频/DSP 播放冒烟，因此“现有播放不回归”仍只由 JVM 测试支持，
+不能声称已在设备上回归。
+
+**状态**：`IN_PROGRESS`。构建与 JVM 测试已通过，音量卡也在模拟器上完成了 5/15→3/15 的基础读写验证；
+但路线图验收要求的第三方播放器共存、实际声音一致、边界/不可调状态、外部音量同步与 iQOO Z9T 真机
+仍未完成，故不标 `DONE` / `VERIFIED`。
+
+**明确不声称**：没有实现第三方音频捕获（`AudioPlaybackCapture` / `MediaProjection`）、没有按应用
+分流音量、没有动态压缩或响度保护，也不声称原生音频已被实时压缩；DG-024 只控制系统 `STREAM_MUSIC`
+通道，必然同时影响其他媒体应用。
+
+**提交状态**：第二十五/二十六轮代码与文档更新**尚未提交、未推送**；用户要求本轮完成后暂停，提交与
+推送由主代理后续同步。
 
 ---
 
@@ -1183,7 +1268,7 @@ UI 报的是 `READY`（未观察到 `ACTIVE`），无逐块日志/波形/录音�
 
 ---
 
-## 环境记录（截至第二十一阶段）
+## 环境记录（截至第二十五阶段）
 
 1. 第一阶段：`pwsh` / `terminal_open` 在启动阶段失败，
    `Error: SetNamedSecurityInfoW failed (Win32 5): grantWrite(E:\DreamGuard)`，无法执行任何命令；
@@ -1290,6 +1375,18 @@ UI 报的是 `READY`（未观察到 `ACTIVE`），无逐块日志/波形/录音�
     （`Error: SetNamedSecurityInfoW failed (Win32 5): grantWrite(E:\DreamGuard)`），所有命令（含 `pwd`）均未进入命令体。
     按用户要求**未修改 ACL、未申请 `danger-full-access`、未安装任何东西、未做真机测试**；本轮只做源码/测试/文档写入，
     C++ 桥、JNI、Kotlin 处理器与两组测试**全部未编译、未运行**。构建与测试由主代理独立执行。
+18. 第二十五阶段（DG-024 系统媒体音量控制）：本会话 `pwsh` 与 `terminal_open` 仍以同一错误在启动阶段失败
+    （`Error: SetNamedSecurityInfoW failed (Win32 5): grantWrite(E:\DreamGuard)`），未改 ACL、未申请
+    `danger-full-access`、未安装任何东西；因此新代码与 12 个 JVM 测试**未编译、未运行**，没有 APK、模拟器或
+    真机证据。本轮只做源码/测试/文档写入；构建、单测与设备验证命令见“DG-024”节与 README，后由主代理执行。
+19. 第二十六阶段（DG-024 主代理实测 + 文档回填）：主代理在本机执行
+    `.\gradlew.bat --no-daemon --offline :app:testDebugUnitTest :app:assembleDebug` → **BUILD SUCCESSFUL**，
+    测试报告 **92 tests / 0 failures / 0 skipped**；在 API 35 x86_64 模拟器安装启动，未启动 DreamGuard
+    声景时系统媒体音量 33%（5/15），用音量卡调到 20%（3/15），`dumpsys audio` 记录
+    `setStreamVolume STREAM_MUSIC index 3 oldIndex 5 from com.dreamguard.app`，页面显示 20%。
+    本会话（第二十六阶段）**只更新文档，未运行命令、未改代码**；第三方播放器共存、外部音量同步
+    （模拟器 adb 调节未生效）、固定输出/蓝牙/真机均未验证。第二十五/二十六轮更新**未提交、未推送**；
+    用户要求本轮完成后暂停，提交与推送由主代理后续同步。
 
 ## 复现命令（第二至第五轮实际使用；第六至第二十三轮按标注部分执行）
 

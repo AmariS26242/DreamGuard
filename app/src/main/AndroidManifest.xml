@@ -5,7 +5,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
     <!-- No network, storage, or microphone permission is needed: the app only
-         renders local DSP audio and a bundled loop. -->
+         renders local DSP audio and a bundled loop, and adjusts the shared
+         STREAM_MUSIC volume through public AudioManager APIs (no permission). -->
 
     <application
         android:allowBackup="true"

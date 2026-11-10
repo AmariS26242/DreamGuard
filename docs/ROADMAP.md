@@ -18,17 +18,38 @@
 
 ## 当前优先目标：第三方媒体音量控制（P0）
 
-产品目标是在用户使用第三方媒体应用时，让 DreamGuard 能控制系统媒体音量，并逐步实现睡眠定时与渐弱。现有本地播放和 DSP 是已建立的基础；第三方媒体音量控制目前尚未实现。下列新增任务均从 `TODO` 开始，测试证据在实际执行后登记，不能由计划推定完成。
+产品目标是在用户使用第三方媒体应用时，让 DreamGuard 能控制系统媒体音量，并逐步实现睡眠定时与渐弱。现有本地播放和 DSP 是已建立的基础；第二十六轮主代理已构建（BUILD SUCCESSFUL）并通过 **92 tests / 0 failures / 0 skipped**，在 API 35 x86_64 模拟器验证系统媒体音量从 33%（5/15）调到 20%（3/15）、`dumpsys audio` 记录 `setStreamVolume STREAM_MUSIC index 3 oldIndex 5 from com.dreamguard.app`、页面显示 20%；但第三方播放器共存、外部音量同步、固定输出/蓝牙/真机均未验证，因此 DG-024 仍为 `IN_PROGRESS`。下列任务中未执行的部分仍从 `TODO` 开始，测试证据在实际执行后登记，不能由计划推定完成。
 
 **能力边界：**第一版通过 Android 系统媒体音量控制，影响同一媒体音量通道的其他应用，不能承诺只调整某一个应用、消除所有突发响声或精细压缩动态范围。不同设备、固定音量和蓝牙输出的表现需要实测。第三方应用持续播放时，DreamGuard 不应因启动自身声景或申请音频焦点而无故打断它。参考：[Android 音频输出与音量控制](https://developer.android.com/media/platform/output)。
 
 ### DG-024：第三方媒体音量控制原型
 
-- **状态：**`TODO`。
+- **状态：**`IN_PROGRESS`（2026-11-10 第二十六轮：主代理执行构建与 JVM 单测 → BUILD SUCCESSFUL、
+  **92 tests / 0 failures / 0 skipped**；API 35 x86_64 模拟器验证 5/15→3/15 与 `dumpsys audio` 记录。
+  仍缺第三方播放器共存、外部音量同步、固定输出/蓝牙/真机，验收未达成）。
 - **目标：**第三方媒体应用播放时，用户可在 DreamGuard 查看和调节系统媒体音量。
 - **交付物：**系统媒体音量读取与调整、设备是否支持音量调整的检查、最小控制界面、失败及不支持状态提示；不启动 DreamGuard 音频也能使用控制，修改不应隐式申请会打断第三方播放的音频焦点。
+- **第二十五轮已落地（第二十六轮构建与 JVM 测试通过，设备侧仅部分验证）：**`SystemMediaVolume.kt`（纯 Kotlin：范围/钳制、固定音量、单级输出、
+  读失败、写异常、平台静默忽略写入、外部变化去重通知）、`AudioManagerMediaVolume.kt`
+  （只操作 `STREAM_MUSIC`；无新增权限、无 `requestAudioFocus`；`Settings.System` 观察器）、
+  `DreamGuardScreen.kt` 的“系统媒体音量”卡（滑块按平台最小/最大分级，固定/失败/不可调文案，
+  `ON_START`/`ON_STOP` 注册与反注册）、`SystemMediaVolumeTest.kt`（12 个 JVM 测试）。
+  界面明确说明影响所有媒体应用、不是单应用音量；音量卡不依赖播放服务，打开应用不会自动播放。
+- **第二十六轮执行证据（主代理在本机/API 35 x86_64 模拟器执行；本会话只登记）：**
+  - `.\gradlew.bat --no-daemon --offline :app:testDebugUnitTest :app:assembleDebug` → **BUILD SUCCESSFUL**，
+    测试报告 **92 tests / 0 failures / 0 skipped**。
+  - 模拟器安装启动；**未启动 DreamGuard 声景**，页面待机、系统媒体音量 **33%（5/15）**；用音量卡滑块调到
+    **20%（3/15）**，`dumpsys audio` 记录
+    `setStreamVolume STREAM_MUSIC index 3 oldIndex 5 from com.dreamguard.app`，页面显示 **20%**。
+  - 该证据证明：Debug 构建与 JVM 测试通过；不播放 DreamGuard 时音量卡能读取并写入真实 `STREAM_MUSIC`
+    通道，系统音频服务接受写入，界面与系统索引一致。
+  - **不证明**：第三方播放器共存/不被打断、实际声音电平变化、外部音量变化同步（模拟器 adb 调节未生效）、
+    边界/固定音量/蓝牙/真机、音频焦点行为；也不证明原生实时压缩或单应用音量。
 - **验收标准：**在 iQOO Z9T 与至少一个指定第三方播放器实测，调节后系统媒体音量和实际声音变化一致；第三方播放器持续播放；界面正确反映音量、边界与不可调状态；记录同时影响其他媒体应用的行为。Debug 构建与相关单元测试通过。
-- **测试证据：**待收集（构建与测试输出、设备/系统版本、播放器及版本、操作结果和必要日志）。
+- **测试证据：**部分已收集（见上）。已有：构建与 **92/0** JVM 输出、API 35 x86_64 模拟器安装/启动、
+  未播放时 5/15→3/15 的界面与 `dumpsys audio` 记录。仍缺：iQOO Z9T 真机、指定第三方播放器版本与共存记录、
+  实际声音/电平、外部音量键同步、固定输出/蓝牙、边界与不可调 UI、必要日志。DG-024 因此仍 `IN_PROGRESS`，
+  不标 `DONE` / `VERIFIED`。
 - **估算：**1–3 个开发日做出可测试原型；为粗略工作量估计，取决于设备与第三方播放器测试结果，并非交付承诺。
 
 ### DG-025：睡眠定时与渐弱控制
@@ -432,6 +453,12 @@ DG-014 `IN_PROGRESS`（`limiter.h` / `limiter.cpp` / `test_limiter.cpp` 与 CMak
 API 35 模拟器实测 **2113 checks / 0 failures**，Gradle `testDebugUnitTest assembleDebug assembleRelease` 成功、
 三个 ABI 通过、JVM up-to-date；但只保证 sample peak，未做过采样 true-peak 测量、无真机/听感、未接播放链路，
 验收仍未达成）。
+DG-024 `IN_PROGRESS`（第二十五轮写入系统媒体音量读取/调节、固定/失败/外部变化处理与最小 UI；
+第二十六轮主代理实测 **BUILD SUCCESSFUL、92 tests / 0 failures / 0 skipped**，API 35 x86_64 模拟器未启动
+声景时 33%（5/15）→20%（3/15），`dumpsys audio` 记录 `setStreamVolume STREAM_MUSIC index 3 oldIndex 5 from
+com.dreamguard.app`，页面 20%；仍无第三方播放器共存、外部音量同步、固定输出/蓝牙/真机证据，
+不标 `DONE`/`VERIFIED`；只控制系统 `STREAM_MUSIC`，不做按应用分流、捕获或动态压缩）。
+**第二十六轮文档回填未提交**；用户要求本轮完成后暂停，提交与推送由主代理后续同步。
 DG-020 `DONE` 不标 `VERIFIED`（第二十二轮新增独立 PCM surface：`NativePcmProcessor` 5 个 JNI 符号与
 `NativePcmProcessorContractTest`；**第二十三轮已编译进 Debug 三 ABI，契约测试在 80 JVM tests 中通过**；
 第二十四轮模拟器“本地压缩就绪”间接说明库加载/`nativeCreate` 未报错，但无 `nativeProcess`/`reset`/`destroy`

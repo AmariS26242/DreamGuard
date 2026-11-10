@@ -2,7 +2,7 @@
 
 DreamGuard 是一个 Android-first 的睡眠声景应用骨架：Jetpack Compose 界面、Media3 环境音轨、以及一个用 **C++20 + NDK/CMake** 实现、通过 **JNI** 驱动的实时 DSP 声景引擎。所有声音都在本机生成或来自 APK 内置循环，应用不申请网络、麦克风或存储权限。
 
-> 当前优先目标：第三方媒体播放期间的系统媒体音量控制。功能尚未实现，详见[开发路线图](docs/ROADMAP.md)。
+> 当前优先目标：第三方媒体播放期间的系统媒体音量控制。第二十六轮主代理已构建（BUILD SUCCESSFUL）并通过 **92 tests / 0 failures / 0 skipped**，在 API 35 x86_64 模拟器验证未播放 DreamGuard 时 33%（5/15）→20%（3/15）的系统媒体音量读写（`dumpsys audio` 有记录）；但第三方播放器共存、外部同步、固定输出/蓝牙/真机未验证，状态仍为 `IN_PROGRESS`，更新**尚未提交**；详见[开发路线图](docs/ROADMAP.md)。
 
 > 当前版本是 **工程骨架 / 可运行原型**，不是已经过真机长时间睡眠验证的产品。未验证项见[验证状态](#验证状态)。
 
@@ -10,14 +10,15 @@ DreamGuard 是一个 Android-first 的睡眠声景应用骨架：Jetpack Compose
 
 - Compose + Material 3 深色睡眠界面，单屏操作。
 - 播放/暂停由原生 DSP 生成的声景：双正弦低频 drone、粉红噪声、低通音色控制、软限幅、2 秒淡入。
-- 可调音量、音色亮度（低通截止频率）、噪声音量、低频频率。
+- 可调声景音量、音色亮度（低通截止频率）、噪声音量、低频频率。
 - Media3 ExoPlayer 播放 APK 内置的可循环环境音轨，可与原生声景叠加；环境音关闭时该轨道静音，以维持统一媒体会话。也可通过系统文件选择器打开本机音频（`OpenDocument`，无需存储权限）；本地文件与内置轨道互斥，可播放/暂停/恢复/关闭，并可挂一个 16-bit PCM 处理级（见“架构”）。
 - 播放由 MediaSessionService 管理，提供媒体通知和后台播放；点击通知/锁屏卡片返回应用。音频焦点中断及耳机拔出时暂停声景，但保留会话，中断结束后可继续。
+- **系统媒体音量卡（DG-024，已构建/基础验证，未完成验收）**：直接读取和调节 Android `STREAM_MUSIC` 通道（`AudioManager`），**不需要播放 DreamGuard 声景、不申请音频焦点、不新增权限**。滑块按设备实际最小/最大索引分级；固定音量设备、单级输出、读取失败、写入被拒/忽略、外部音量键或其他应用造成的音量变化都有对应状态。文案明确该通道**影响所有媒体应用，不是只调 DreamGuard 或某一个播放器**，且不会自动启动/暂停第三方播放器。第二十六轮主代理实测 JVM **92/0**，并在 API 35 x86_64 模拟器未播放时把系统音量从 33%（5/15）调到 20%（3/15）；第三方播放器共存、外部同步、固定输出/蓝牙/真机仍未验证。
 - DSP 渲染线程异步失败时：若只有 DSP 层在播，暂停媒体会话以免留下无声的前台服务；若环境音同时在播，保留环境音并在界面显示 DSP 错误。失败按 `TRANSIENT` / `PERMANENT` 分类；**临时输出错误不会清除已保存的 DSP/环境音选择**，只有用户主动关闭层或成功重启才更新状态。
 - 开始被上一段渲染线程的关闭延迟时，服务做最多 6 次 × 250 ms 的有界重试，界面显示“正在等待上一段音频结束…”；重试耗尽后暂停并给出“上一段音频仍在关闭，请稍后重试”的可见提示，用户再点播放即显式重试，**不会自动播放**。
 - 媒体播放器内部错误与用户暂停分开处理：错误暂停不会触发 `stopSelf()`，错误文案保留在界面上，直到成功重试或用户主动关闭。
 - 纯 Kotlin 的 `PlaybackController` 状态机与失败/恢复策略不依赖 Android，可直接在 JVM 上测试。
-- 58 个既有 JVM 单元测试覆盖参数清洗、状态迁移、错误路径、监听通知、渲染线程停止/销毁时序、失败分类、有界重试、零写退避、两层选择状态与 JNI 命名契约；第十九轮新增 10 个 `LocalAudioProcessorTest`（增益全值域、bypass 位精确、协商/拒绝、flush/EOS/reset）。第二十轮主代理执行 `testDebugUnitTest --rerun-tasks`：**68 tests / 0 failures / 0 skipped**。
+- 58 个既有 JVM 单元测试覆盖参数清洗、状态迁移、错误路径、监听通知、渲染线程停止/销毁时序、失败分类、有界重试、零写退避、两层选择状态与 JNI 命名契约；第十九轮新增 10 个 `LocalAudioProcessorTest`（增益全值域、bypass 位精确、协商/拒绝、flush/EOS/reset），第二十轮主代理实测 68/0/0，第二十三轮实测 **80 tests / 0 failures / 0 skipped**。第二十五轮新增 **12 个** `SystemMediaVolumeTest`（范围与钳制、固定音量、单级输出、读/写失败、平台静默忽略写入、外部变化去重通知、失败恢复），**第二十六轮主代理实测：92 tests / 0 failures / 0 skipped**。
 - GitHub Actions：JDK 17、Android SDK 35、NDK 27.0.12077973、CMake 3.22.1，执行 `testDebugUnitTest` 与 `assembleDebug`。
 
 ## 技术栈
@@ -48,6 +49,7 @@ DreamGuard/
 │       │   │   ├── MainActivity.kt
 │       │   │   ├── audio/
 │       │   │   │   ├── AudioEngine.kt
+│       │   │   │   ├── AudioManagerMediaVolume.kt # DG-024 STREAM_MUSIC 读写 + 外部音量变化观察
 │       │   │   │   ├── AudioPlatform.kt      # AudioTrack / JNI 适配层
 │       │   │   │   ├── AudioSettings.kt
 │       │   │   │   ├── LocalAudioProcessor.kt     # 16-bit PCM → native 压缩器；失败/关闭时逐字节 bypass
@@ -59,7 +61,8 @@ DreamGuard/
 │       │   │   │   ├── PlaybackFailurePolicy.kt
 │       │   │   │   ├── PlaybackLayers.kt
 │       │   │   │   ├── PlaybackRecoveryPolicy.kt
-│       │   │   │   └── PlaybackService.kt
+│       │   │   │   ├── PlaybackService.kt
+│       │   │   │   └── SystemMediaVolume.kt       # DG-024 纯 Kotlin 系统音量规则
 │       │   │   └── ui/
 │       │   │       ├── DreamGuardScreen.kt
 │       │   │       └── theme/Theme.kt
@@ -76,7 +79,8 @@ DreamGuard/
 │           ├── PlaybackControllerTest.kt
 │           ├── PlaybackFailurePolicyTest.kt
 │           ├── PlaybackLayersTest.kt
-│           └── PlaybackRecoveryPolicyTest.kt
+│           ├── PlaybackRecoveryPolicyTest.kt
+│           └── SystemMediaVolumeTest.kt        # DG-024（12 个测试；第二十六轮 92/0 已实测）
 ├── dsp-core/                                 # Gradle 模块 :dsp-core，可移植 C++20
 │   ├── build.gradle.kts                      # dspCoreConfigure / dspCoreBuild / dspCoreTest
 │   ├── CMakeLists.txt                        # 静态库 dreamguard_dsp_core
@@ -180,6 +184,17 @@ Compose UI → PlaybackService（媒体会话、前台服务、共享音频焦�
 界面绑定服务；服务负责释放播放器、媒体会话和原生引擎。
 ```
 
+**系统媒体音量（第二十五轮实现、第二十六轮构建与模拟器基础验证，DG-024，未完成验收）**：`SystemVolumeController`（纯 Kotlin）通过 `MediaVolumeBackend`
+读写系统 `STREAM_MUSIC` 通道；`AudioManagerVolumeBackend` 只调用公开音量 API（无新增权限、无
+`requestAudioFocus`、flags=0 不弹系统音量面板），`SystemVolumeObserver` 观察公开的
+`content://settings/system` 表以吸收硬件音量键、系统面板和其他应用造成的外部变化。音量卡在 `ON_START`
+注册观察者并刷新、在 `ON_STOP` 反注册，Composition 晚于 `ON_START` 时补一次注册；整个过程不经过
+DSP/音频线程，也不启动、暂停或抢占第三方播放器。该卡在播放服务尚未连接时也渲染，打开应用不会自动播放。
+**注意**：`STREAM_MUSIC` 是共享媒体通道，调节必然同时影响其他媒体应用；本原型不做按应用分流、音频捕获
+或动态压缩。第二十六轮主代理已构建并通过 **92/0** JVM 测试，在 API 35 x86_64 模拟器验证未播放时
+33%（5/15）→20%（3/15）；第三方播放器共存、外部同步、固定输出/蓝牙/真机仍未验证。音量 API 的权限与固定音量说明见
+[`AudioManager.setStreamVolume`](https://developer.android.com/reference/android/media/AudioManager#setStreamVolume(int,%20int,%20int))。
+
 **本地音频（第十九至二十三轮）**：`PlaybackService` 复用同一个 `ExoPlayer` 播放系统文件选择器返回的 `content://` URI
 （`OpenDocument` + 持久化读授权，进程重建后校验授权恢复）；本地模式与内置 `dream_loop` 互斥，
 暂停保留媒体会话。`LocalAudioRenderersFactory` 通过 `DefaultAudioSink.Builder.setAudioProcessors`
@@ -261,6 +276,7 @@ Compose UI → PlaybackService（媒体会话、前台服务、共享音频焦�
 - `PlaybackFailurePolicyTest`：异步 DSP 失败时是否暂停媒体播放器的决策矩阵——仅 DSP 层要暂停、两层同时选中不暂停（保留环境音）、仅环境音与无选择都不受影响；以及只有显式用户暂停才结束服务、内部失败清理不结束服务。
 - `PlaybackRecoveryPolicyTest`：延迟启动的重试矩阵——仅 DSP 层且 `playWhenReady` 时尝试启动、已在运行不重复启动、延迟启动在预算内重试、达到 6 次上限停止、真实失败不按延迟启动重试、用户取消（`playWhenReady=false`）或仅环境音时不重试。
 - `JniContractTest`：反射检查原生方法名没有 Kotlin 模块后缀（Debug/Release 都不允许），并解析 `jni_bridge.cpp` 的导出符号与类声明的原生方法逐一比对，防止 JNI 命名回退。
+- `SystemMediaVolumeTest`（DG-024，12 个）：系统媒体音量的读取范围与越界钳制、固定音量设备只读且不写、单级输出不可调、读失败降级、写入异常、平台静默忽略写入、外部变化只通知一次且空刷新不通知、成功/失败写入的发布行为、失败恢复。**第二十六轮主代理实测：92 tests / 0 failures / 0 skipped（含本类 12 个）**。
 
 原生测试在 `dsp-core/tests`（CTest 注册，宿主执行，不需要 NDK 或手机）：
 
@@ -374,6 +390,44 @@ adb shell am start -n com.dreamguard.app/.MainActivity
 | NDK 找不到 | 安装 27.0.12077973，或同步修改 `ndkVersion` 与 CI 的 `sdkmanager` 参数。 |
 
 ## 验证状态
+
+### 2026-11-10 第二十六轮：DG-024 构建、JVM 92/0 与模拟器基础音量验证（主代理执行；更新未提交）
+
+- 主代理执行 `.\gradlew.bat --no-daemon --offline :app:testDebugUnitTest :app:assembleDebug`：
+  **BUILD SUCCESSFUL**，测试报告 **92 tests / 0 failures / 0 skipped**。
+- API 35 x86_64 模拟器安装并启动；**未启动 DreamGuard 声景**，页面待机，系统媒体音量 **33%（5/15）**；
+  用“系统媒体音量”卡滑块调到 **20%（3/15）**，`dumpsys audio` 记录
+  `setStreamVolume STREAM_MUSIC index 3 oldIndex 5 from com.dreamguard.app`，页面显示 **20%**。
+- **能证明**：Debug 构建与 JVM 测试通过；不播放 DreamGuard 时音量卡能读取并写入真实 `STREAM_MUSIC`
+  通道，系统音频服务接受写入，界面与系统索引一致。
+- **不能证明**：第三方播放器共存/不被打断、实际声音电平或听感、外部音量变化同步（模拟器 adb 调节未
+  生效，未可靠验证）、音量边界与固定音量/单级输出 UI、蓝牙/固定输出/iQOO Z9T 真机、音频焦点行为；
+  也不证明原生音频实时压缩或单应用音量。
+- 回归边界：本轮**未启动 DreamGuard 声景**，也没有本地音频/DSP 播放冒烟；“现有播放不回归”目前只由
+  **92/0** JVM 测试支持，不能声称已在设备上回归。
+- 状态仍 `IN_PROGRESS`：路线图验收要求的第三方播放器、实际声音、边界/不可调状态、外部同步、真机未完成。
+  **第二十五/二十六轮更新尚未提交、未推送**；用户要求本轮完成后暂停，提交与推送由主代理后续同步。
+
+### 2026-11-10 第二十五轮：DG-024 系统媒体音量控制原型（代码写入；第二十六轮已补构建/测试）
+
+- 新增 `app/src/main/java/com/dreamguard/app/audio/SystemMediaVolume.kt`（纯 Kotlin 范围/固定/失败/外部变化
+  规则）、`AudioManagerMediaVolume.kt`（`STREAM_MUSIC` 读写 + `Settings.System` 观察）、
+  `app/src/test/java/com/dreamguard/app/audio/SystemMediaVolumeTest.kt`（12 个 JVM 测试），并在
+  `DreamGuardScreen.kt` 加“系统媒体音量”卡；原 DSP 增益卡改名“声景音量”。
+- **本会话 `pwsh` 与 terminal 在启动阶段失败**：`Error: SetNamedSecurityInfoW failed (Win32 5):
+  grantWrite(E:\DreamGuard)`；按用户要求未改 ACL、未申请 `danger-full-access`。因此**没有构建、没有运行
+  JVM 测试、没有 APK、没有模拟器或真机结果**。12 个测试当时**尚未执行**，不得写成“通过”（第二十六轮已补执行，见上节）。
+- 当时待主代理执行并回填：`.\gradlew.bat --no-daemon --offline :app:testDebugUnitTest` 与
+  `.\gradlew.bat --no-daemon --offline :app:assembleDebug`（当时预期 92 个 JVM 测试）。**第二十六轮已执行：
+  BUILD SUCCESSFUL、92 tests / 0 failures / 0 skipped，见上节。**
+- 模拟器/本机验证建议：安装后**不按播放**，直接拖动“系统媒体音量”滑块；`adb shell dumpsys audio` 的 focus
+  stack 在此之前不应出现 `com.dreamguard.app`；让另一媒体应用后台播放并确认调音量时它继续播放；再用音量键
+  改变系统音量，确认界面百分比跟随。
+- 回归边界：本轮未改 `PlaybackService` / `PlaybackController` / DSP / `LocalAudioProcessor`，改动是新增文件、
+  在 UI 插入音量卡（服务未连接分支也放一张）、把原 DSP 增益卡标题“音量”改为“声景音量”；但“不回归”仍需
+  主代理跑完整 JVM 测试与一次模拟器启动/播放冒烟后才能判定。
+- 状态 `IN_PROGRESS`：验收要求的 iQOO Z9T + 指定第三方播放器实测按用户要求延后；不声称第三方音频捕获、
+  按应用分流或动态压缩已实现。
 
 ### 2026-11-10 第二十四轮：API 35 x86_64 模拟器安装当前 Debug APK（播放状态 / 本地压缩就绪）
 
@@ -584,6 +638,11 @@ adb shell am start -n com.dreamguard.app/.MainActivity
   未做标准认证，LUFS 仍 `PROVISIONAL`；peak 也只是采样峰值，不是 true peak。
 - [ ] 本轮 `assembleRelease` 构建已成功，但签名与混淆（当前 release 未开启 R8）仍未验证。
 - [x] GitHub Actions 已触发并通过；后续代码变更仍需关注 Actions 结果。
+- [ ] **DG-024 系统媒体音量控制仅完成部分验证**：第二十六轮主代理执行构建 **BUILD SUCCESSFUL**、JVM
+  **92 tests / 0 failures / 0 skipped**，并在 API 35 x86_64 模拟器完成“未播放时 33%（5/15）→20%（3/15）”
+  的读写，`dumpsys audio` 有 `setStreamVolume STREAM_MUSIC index 3 oldIndex 5 from com.dreamguard.app` 记录；
+  但第三方播放器共存/不被打断、实际声音电平、外部音量变化同步（模拟器 adb 调节未生效）、边界/固定音量/
+  单级输出 UI、蓝牙/固定输出/真机均未验证；验收要求 iQOO Z9T + 指定第三方播放器实测，按用户要求延后。
 - [ ] 未做 instrumented / UI 自动化测试。
 
 ## 风险与限制

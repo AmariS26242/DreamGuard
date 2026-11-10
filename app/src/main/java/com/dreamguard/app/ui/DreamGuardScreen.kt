@@ -43,15 +43,22 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
+import com.dreamguard.app.audio.AudioManagerVolumeBackend
 import com.dreamguard.app.audio.AudioSettings
 import com.dreamguard.app.audio.LocalAudioProcessor
 import com.dreamguard.app.audio.PlaybackService
+import com.dreamguard.app.audio.SystemVolumeController
+import com.dreamguard.app.audio.SystemVolumeObserver
 import java.util.Locale
+import kotlin.math.roundToInt
 
 @Composable
 fun DreamGuardScreen() {
@@ -77,18 +84,27 @@ fun DreamGuardScreen() {
     }
     val playback = service
     if (playback == null) {
-        // The service bind is asynchronous; do not blank the whole screen while it runs.
+        // The service bind is asynchronous; do not blank the whole screen while it
+        // runs. System media volume does not need the playback service at all, so
+        // it stays usable even while (or if) the bind is still pending.
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color(0xFF0B1026)),
             contentAlignment = Alignment.Center,
         ) {
-            Text(
-                text = "正在连接播放服务…",
-                color = Color(0xFFB6BCDA),
-                fontSize = 13.sp,
-            )
+            Column(
+                modifier = Modifier.padding(horizontal = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    text = "正在连接播放服务…",
+                    color = Color(0xFFB6BCDA),
+                    fontSize = 13.sp,
+                )
+                Spacer(Modifier.height(20.dp))
+                SystemVolumeCard()
+            }
         }
         return
     }
@@ -214,8 +230,17 @@ fun DreamGuardScreen() {
 
             Spacer(Modifier.height(28.dp))
 
+            // System STREAM_MUSIC control. Deliberately independent of DSP/Media3
+            // playback: it reads and writes the shared channel without starting
+            // DreamGuard audio or requesting audio focus.
+            SystemVolumeCard()
+
+            Spacer(Modifier.height(12.dp))
+
             ControlCard(
-                title = "音量",
+                // Renamed from "音量" so it cannot be confused with the system
+                // media channel card above.
+                title = "声景音量",
                 valueLabel = "${(snapshot.settings.gain * 100).toInt()}%",
             ) {
                 Slider(
@@ -308,6 +333,177 @@ fun DreamGuardScreen() {
                 textAlign = TextAlign.Center,
             )
             Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun SystemVolumeCard() {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    // One controller per composition of the Activity. The system volume is the
+    // persisted truth, so an Activity recreation simply re-reads it.
+    val controller = remember(context) {
+        SystemVolumeController(AudioManagerVolumeBackend(context.applicationContext))
+    }
+    var snapshot by remember(controller) { mutableStateOf(controller.read()) }
+    var writeMessage by remember(controller) { mutableStateOf<String?>(null) }
+
+    DisposableEffect(controller, lifecycleOwner) {
+        val observer = SystemVolumeObserver(context.applicationContext) {
+            // Hardware keys, the system panel or another app: re-read and let the
+            // controller suppress updates that changed nothing visible.
+            controller.refresh()
+        }
+        controller.listener = { latest ->
+            snapshot = latest
+            // A real state change (for example a hardware volume key) makes a
+            // previous write-failure message stale.
+            writeMessage = null
+        }
+        val lifecycleObserver = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> {
+                    // Picks up levels changed while the Activity was stopped.
+                    observer.start()
+                    controller.refresh()
+                }
+                Lifecycle.Event.ON_STOP -> observer.stop()
+                else -> Unit
+            }
+            Unit
+        }
+        lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
+        // Composition usually happens after ON_START, which would otherwise never
+        // be delivered here. Both calls are idempotent.
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+            observer.start()
+            controller.refresh()
+        }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
+            observer.stop()
+            controller.listener = null
+        }
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        color = Color.White.copy(alpha = 0.055f),
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "系统媒体音量",
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontSize = 14.sp,
+                    )
+                    Text(
+                        text = "第三方播放器与所有媒体应用共用此通道",
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+                        fontSize = 11.sp,
+                    )
+                }
+                Text(
+                    text = when {
+                        !snapshot.isAvailable -> "—"
+                        snapshot.isFixed -> "${snapshot.percent}% · 固定"
+                        !snapshot.isAdjustable -> "不可调"
+                        else -> "${snapshot.percent}%"
+                    },
+                    color = MaterialTheme.colorScheme.primary,
+                    fontSize = 13.sp,
+                )
+            }
+
+            when {
+                !snapshot.isAvailable -> {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = snapshot.readError ?: "无法读取系统媒体音量",
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(onClick = {
+                        writeMessage = null
+                        controller.refresh()
+                    }) {
+                        Text("重试", fontSize = 13.sp)
+                    }
+                }
+
+                snapshot.isFixed -> {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = "此设备的媒体音量由硬件固定，应用无法调节；请使用设备音量键或系统设置。",
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                        fontSize = 12.sp,
+                    )
+                }
+
+                !snapshot.isAdjustable -> {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        text = "当前输出只有一个音量级别（${snapshot.maxIndex}），应用无法再细分。",
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                        fontSize = 12.sp,
+                    )
+                }
+
+                else -> {
+                    Slider(
+                        value = snapshot.currentIndex.toFloat(),
+                        onValueChange = { value ->
+                            val result = controller.setIndex(value.roundToInt())
+                            // A rejected write keeps its message; the slider snaps
+                            // back to the value the system still holds.
+                            writeMessage = if (result.isApplied) null else result.message
+                        },
+                        valueRange = snapshot.minIndex.toFloat()..snapshot.maxIndex.toFloat(),
+                        // Steps between the platform endpoints; 0 for a 2-level range.
+                        steps = (snapshot.maxIndex - snapshot.minIndex - 1).coerceAtLeast(0),
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = "最小 ${snapshot.minIndex}",
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                            fontSize = 10.sp,
+                        )
+                        Text(
+                            text = "最大 ${snapshot.maxIndex}",
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                            fontSize = 10.sp,
+                        )
+                    }
+                }
+            }
+
+            writeMessage?.let { message ->
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = message,
+                    color = MaterialTheme.colorScheme.error,
+                    fontSize = 11.sp,
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "调节的是系统媒体音量通道（STREAM_MUSIC），会影响所有使用该通道的应用，" +
+                    "不是只调 DreamGuard 或某一个播放器。调整不会启动、暂停或抢占第三方播放器的音频焦点。",
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.42f),
+                fontSize = 11.sp,
+            )
         }
     }
 }

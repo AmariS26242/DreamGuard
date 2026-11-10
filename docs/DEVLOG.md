@@ -5,6 +5,94 @@
 
 ---
 
+## 2026-11-10 — 第 26 轮：DG-024 构建、JVM 92/0 与模拟器基础音量验证（主代理执行；文档回填）
+
+**Commit**：未提交（用户要求不提交、不推送；本轮完成后暂停，提交与推送由主代理后续同步）。
+
+**完成任务编号**：DG-024（第三方媒体音量控制原型）。状态仍 `IN_PROGRESS`。
+
+**执行者与范围**：主代理在本机 / API 35 x86_64 模拟器执行；本会话仅更新文档，未改代码、未运行命令。
+
+**命令与结果**
+
+| 项目 | 结果 |
+| --- | --- |
+| 构建 + JVM 单测 | `.\gradlew.bat --no-daemon --offline :app:testDebugUnitTest :app:assembleDebug` → **BUILD SUCCESSFUL**；**92 tests / 0 failures / 0 skipped** |
+| 模拟器 | API 35 x86_64 安装并启动；未启动 DreamGuard 声景，页面待机，系统媒体音量 **33%（5/15）** |
+| 音量卡操作 | 滑块调到 **20%（3/15）**；`dumpsys audio` 记录 `setStreamVolume STREAM_MUSIC index 3 oldIndex 5 from com.dreamguard.app`；页面显示 20% |
+
+**能证明什么**
+
+- Debug 构建与 JVM 测试通过（既有 80 + 新增 12）。
+- 不播放 DreamGuard 时，音量卡能读取并写入真实 `STREAM_MUSIC` 通道；系统音频服务接受写入；界面与系统索引一致。
+
+**不能证明什么**
+
+- 没有第三方播放器共存证据：未验证播放器持续播放、不暂停/不被 duck，也未记录第三方应用版本。
+- 没有实际声音电平/听感证据：只核对了系统索引与页面显示。
+- 外部音量变化同步未可靠验证：模拟器上用 adb 调节没有生效，不能据此判定 Settings 观察器在真机上的表现。
+- 未覆盖音量边界 0/最大值、固定音量/单级输出、蓝牙/有线/外放、iQOO Z9T 真机；未记录音频焦点检查结果。
+- 不声称原生音频被实时压缩、不声称只影响单个应用。
+
+**未解决问题及下一步**
+
+- 按 DG-026 在指定第三方播放器上验证共存、实际声音与不打断；再补外部音量键同步、边界/固定输出和真机。
+- DG-024 保持 `IN_PROGRESS`，不标 `DONE` / `VERIFIED`。
+- 本轮文档回填未提交；按要求完成后暂停，主代理后续提交并同步。
+
+---
+
+## 2026-11-10 — 第 25 轮：DG-024 系统媒体音量控制原型（代码 + 待执行测试）
+
+**Commit**：未提交（用户要求不提交、不推送）。
+
+**完成任务编号**：DG-024（第三方媒体音量控制原型）。DG-025 / DG-026 / DG-050 未开始。
+
+**为什么记**
+
+路线图把“第三方媒体播放期间的系统媒体音量控制”列为当前优先目标，但本轮之前 DG-024 仍为 `TODO`，界面也没有任何
+系统音量入口。本轮补上原型：只控制 Android 的 `STREAM_MUSIC` 通道，不启动 DreamGuard 声景、不申请音频
+焦点，从而不打断第三方播放器。
+
+**修改模块**
+
+- 新增 `app/src/main/java/com/dreamguard/app/audio/SystemMediaVolume.kt`：纯 Kotlin 的
+  `MediaVolumeBackend` / `SystemVolumeSnapshot` / `SystemVolumeWriteResult` / `SystemVolumeController`。
+  读失败降级为 `isAvailable=false`；固定设备只读；单级输出不可调；写入请求钳制到平台最小/最大；写后回读，
+  平台静默忽略写入判 `FAILED`；`refresh()` 仅在快照变化时通知，外部音量键/其他应用的变更与自身写入共用同一路径。
+- 新增 `app/src/main/java/com/dreamguard/app/audio/AudioManagerMediaVolume.kt`：`STREAM_MUSIC` 的
+  `AudioManager` 适配（API 28 以下 `minIndex=0`）与 `Settings.System` ContentObserver。**没有新增权限**，
+  没有 `requestAudioFocus`，`setStreamVolume(..., 0)` 不请求系统音量面板。
+- `app/src/main/java/com/dreamguard/app/ui/DreamGuardScreen.kt`：新增“系统媒体音量”卡（百分比、最小/最大、
+  分级滑块、固定/单级/读失败/写失败文案与“重试”），并在服务未连接时也可用；`ON_START` 注册观察者并刷新、
+  `ON_STOP` 反注册、`onDispose` 清理；原 DSP 增益卡改名“声景音量”。
+- 新增 `app/src/test/java/com/dreamguard/app/audio/SystemMediaVolumeTest.kt`：12 个 JVM 测试，覆盖范围/钳制、
+  固定设备、单级输出、读失败、写异常、平台静默忽略、外部变化通知去重、成功/失败写入的通知行为、失败恢复。
+
+**测试设备 / 测试结果**
+
+| 项目 | 结果 |
+| --- | --- |
+| 本会话命令环境 | 所有 `pwsh` / terminal 调用在启动阶段失败：`Error: SetNamedSecurityInfoW failed (Win32 5): grantWrite(E:\DreamGuard)`；按用户要求未改 ACL、未申请 `danger-full-access` |
+| Gradle / JVM 测试 | **未执行**（无构建、无 `testDebugUnitTest`；12 个测试只是已写入） |
+| APK / 模拟器 / 真机 | **未执行**；无音量读写、第三方播放器、固定音量设备或外部音量键证据 |
+
+**证据边界**
+
+- 没有编译，因此不能声称新代码可构建；没有运行测试，不能声称任何测试通过。
+- 没有在 iQOO Z9T 或模拟器实测 `STREAM_MUSIC` 读写、固定音量/单级输出、外部变化同步，也没有验证
+  “调节时第三方播放器继续播放”。
+- 只控制系统媒体通道，**不**做第三方音频捕获、按应用分流、动态压缩或响度保护；打开控制卡不会自动启动或
+  暂停第三方播放器。
+
+**未解决问题及下一步**
+
+- 主代理执行 `.\gradlew.bat --no-daemon --offline :app:testDebugUnitTest` 与 `:app:assembleDebug`，
+  回填测试总数/失败数与构建结果；再按用户时间做模拟器/真机及指定第三方播放器实测。
+- 真机验收前 DG-024 保持 `IN_PROGRESS`，不标 `DONE` / `VERIFIED`。
+
+---
+
 ## 2026-11-10 — 调整第三方媒体音量控制优先级
 
 - **Commit：**本条记录随路线图调整提交；代码版本以 Git 历史为准。
