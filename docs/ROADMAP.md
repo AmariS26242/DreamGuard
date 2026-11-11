@@ -293,8 +293,10 @@
   Debug 三 ABI 编译通过；API 35 x86_64 模拟器 `dg_pcm16_processor_tests` **206 checks / 0 failures**、
   `dg_compressor_tests` **348 checks / 0 failures**。**边界**：第二十三轮未运行 APK；**第二十四轮已安装运行，
   打开处理开关 `checked=true` 并显示“本地压缩就绪”（`READY`）**，但未观察到 `ACTIVE`、无逐块日志/波形/录音，
-  JVM fake 后端 ≠ 实测 JNI；无真实音频输出、听感、真机、true peak。验收“真实音频通过 DSP 后正常播放”仍未取得，
-  故保持 `IN_PROGRESS`，不标 `DONE`/`VERIFIED`。
+  第 24 轮证据覆盖格式协商和 native 句柄就绪。
+  **第 32 轮** 在 API 35 模拟器观察到 `ACTIVE`，独立探针实测 48 kHz 双声道 PCM16 播放输出随压缩开关变化。
+  低、高电平输入的 RMS 分别降低约 6.1 dB 和 13.3 dB。文件播完后可从本地卡重播。
+  状态保持 `IN_PROGRESS`，iQOO Z9T 真机听感和兼容性待测。见[开发日志](DEVLOG.md)。
 
 ### DG-023：Android 基础 UI
 

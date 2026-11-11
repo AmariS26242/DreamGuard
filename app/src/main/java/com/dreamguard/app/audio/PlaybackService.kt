@@ -329,6 +329,12 @@ class PlaybackService : MediaSessionService() {
             localPauseKeepsSession = true
             player.pause()
         } else {
+            // A naturally ended file stays in STATE_ENDED at its last position:
+            // play() only toggles playWhenReady, so without a rewind the same spot
+            // would remain stopped and the card would keep offering "播放".
+            if (player.playbackState == Player.STATE_ENDED) {
+                player.seekToDefaultPosition()
+            }
             // ExoPlayer stays in an error state until prepare() is called again.
             if (player.playerError != null) {
                 runCatching { player.prepare() }
