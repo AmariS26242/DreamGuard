@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Debug-only permissions for DG-050. The release/main manifest is not
+         changed: no microphone use, no QUERY_ALL_PACKAGES, no storage access. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <application>
+        <!-- Exported only in the debug source set so `adb shell am start -n`
+             can open the probe. The Activity itself still requires a visible
+             tap before any permission/consent request and before the FGS. -->
+        <activity
+            android:name=".debug.Dg050ProbeActivity"
+            android:exported="true"
+            android:label="DG-050 捕获探针"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.DreamGuard" />
+
+        <!-- Non-exported mediaProjection FGS. It is started only by the probe
+             Activity after a fresh MediaProjection consent. -->
+        <service
+            android:name=".debug.Dg050ProbeService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+    </application>
+
+</manifest>

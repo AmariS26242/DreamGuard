@@ -5,6 +5,36 @@
 
 ---
 
+## 2026-11-11 — 第 31 轮 DG-050 播放捕获实验
+
+**任务** DG-050，状态 `IN_PROGRESS`。DeepSeek V4.1 Flash 以只读档分析，以工作区写入档实现和修复。Codex 独立构建并在 API 35 x86_64 模拟器（`AE3A.240806.019`）验证。
+
+**实现** `app/src/debug` 增加捕获入口和 `mediaProjection` 前台服务。每次由用户授权，按单一 UID 和 `MEDIA/GAME/UNKNOWN` 用途采集播放音频，记录聚合统计。低增益监听回放由用户显式开启，每次采集最多 30 秒。
+
+**构建** 首轮在 `addMatchingUsage` 参数类型处编译失败，Flash 改用整数用途常量后，Gradle `:app:testDebugUnitTest :app:assembleDebug :app:processReleaseMainManifest` 成功。JVM 137 项，0 失败、0 跳过。捕获权限、入口和服务仅出现在 Debug 合并清单。Debug APK SHA-256 为 `6ADA511415321EC5B7E6B83A73FC19F450AE556717CA758809793CE59C530F61`。
+
+| 对照或操作 | 实际结果 |
+| --- | --- |
+| AOSP AudioPreview（UID 10105，`USAGE_UNKNOWN`）播放 180 秒合成 WAV | `ALLOW_AUDIO_PLAYBACK_CAPTURE` 标志可见。捕获格式为 48 kHz、双声道 PCM16。第 7.074 秒累计 326,656 帧、212,928 个非零采样，最近一秒 RMS 为 −41.2 dBFS。 |
+| 开启低增益监听 | 音频服务同时显示原始 `MediaPlayer` 和监听 `AudioTrack` 为 `started`，两者均走模拟器扬声器 `deviceId=2`。系统媒体音量维持 2/15，焦点栈中没有 DreamGuard。该路由证据来自音频服务，物理设备听感待测。 |
+| 读取完成到写入完成的应用层耗时 | 上述第 7.074 秒样本中，287 块均值 0.60 ms，最大 106.57 ms。该口径包含应用处理和写入等待，声学延迟待测。 |
+| DeskClock（UID 10109，`USAGE_ALARM`） | 闹钟音轨两次采样均为 `started`，同期捕获累计至 257,024 帧、非零采样数为 0。结果符合用途过滤。首次因 DeskClock 通知频道异常退出，打开时钟主界面后重试所得数据才计入对照。 |
+| 拒绝授权、手动停止与超时 | 拒绝录音权限和投屏同意均有对应日志，系统没有激活投屏会话。手动停止得到 `capture_finished reason=user_stop`，30 秒到期得到 `reason=timeout`。两轮结束后系统投屏会话均为 `null`。 |
+| 系统撤销与短时锁屏 | SystemUI 启动第二次投屏后，探针记录 `system_revoked` 与 `capture_finished reason=system_revoked`，其前台服务已清除。另一次短时锁屏后，该模拟器版本仍持有投屏授权，iQOO 的锁屏行为待测。 |
+
+复测时先用 `adb shell pm list packages -U` 核对当前设备的来源 UID，再打开 Debug 入口。用合成 WAV 或其它非静音媒体作为正对照。DeskClock 对照先打开时钟主界面，再使用系统计时器触发闹钟，同时检查 `dumpsys audio` 中的音轨状态。
+
+```powershell
+adb shell am start -n com.dreamguard.app/.debug.Dg050ProbeActivity --ei source_uid 10105 --ez monitor true
+adb logcat -s DG050Probe:I
+adb shell dumpsys audio
+adb shell dumpsys media_projection
+```
+
+**路线决定** 第三方睡眠渐弱继续使用共享媒体音量。实时响度保护先沿 DreamGuard 自有播放链路推进。DG-050 已确认公共捕获接口能取得副本，实测监听轨与原声同时存在。iQOO Z9T 与哔哩哔哩的捕获策略、蓝牙路由、锁屏行为和声学延迟留待真机。 [Android 播放捕获文档](https://developer.android.com/media/platform/av-capture)
+
+---
+
 ## 2026-11-11 — 第 30 轮 DG-025 独立构建与模拟器短测
 
 **任务** DG-025，状态 IN_PROGRESS。DeepSeek V4.1 Flash 以只读档分析，以工作区写入档实现和修正。Codex 独立构建、运行测试和核对设备状态。
