@@ -8,6 +8,8 @@ DreamGuard 是一个 Android-first 的睡眠声景应用骨架：Jetpack Compose
 
 > 2026-11-12：本地 PCM16 已接入压缩后的保守 4× 峰值保护，正常结束和切换直通会完整输出尾部。DG-014/015 开发阶段完成，独立参考 120/0、JVM 142/0、300 项性能矩阵已归档。真机听感与长测后补。[阶段报告](docs/evidence/dg014-015-2026-11-12/README.md)
 
+下一阶段已制定 [Part 4：响度匹配与自然听感计划](docs/PART4_PLAN.md)，五项实施任务当前均为 TODO。
+
 ## 功能
 
 - Compose + Material 3 深色睡眠界面，单屏操作。
