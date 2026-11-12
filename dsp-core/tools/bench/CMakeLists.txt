@@ -1,0 +1,8 @@
+add_executable(dg_dsp_bench dg_bench.cpp)
+target_link_libraries(dg_dsp_bench PRIVATE dreamguard_dsp_core)
+target_compile_features(dg_dsp_bench PRIVATE cxx_std_20)
+if(MSVC)
+    target_compile_options(dg_dsp_bench PRIVATE /W4)
+else()
+    target_compile_options(dg_dsp_bench PRIVATE -Wall -Wextra -Wpedantic)
+endif()

@@ -10,6 +10,29 @@
 
 ---
 
+## 2026-11-12 — 第 35 轮 DG-015 DSP 基准工具与模拟器结果
+
+**任务** DG-015。新增 `dsp-core/tools/bench/dg_bench.cpp` 和 CMake 接线。工具输出每块处理的 median、p95 和 xRT，当前覆盖 compressor、sample-peak limiter、4× true-peak analyzer，使用固定正弦输入和 25 次重复。
+
+**环境** NDK 27.0.12077973，API 35 x86_64 模拟器 `ime35`，`steady_clock`，普通进程优先级。编译使用 `-O2 -fPIE -pie -static-libstdc++`。本轮只测 48 kHz/96 kHz、256/512 帧、双声道。
+
+```text
+chain,rate,block,channels,median_us,p95_us,xrt
+compressor,48000,256,2,10.063,12.603,529.994
+limiter,48000,256,2,4.447,5.828,1199.310
+true_peak,48000,256,2,19.187,22.625,277.966
+compressor,48000,512,2,20.185,59.768,528.445
+limiter,48000,512,2,8.853,9.215,1204.865
+true_peak,48000,512,2,38.312,75.088,278.416
+compressor,96000,512,2,19.966,31.384,267.121
+limiter,96000,512,2,7.884,10.813,676.476
+true_peak,96000,512,2,38.297,74.552,139.262
+```
+
+`xRT` 是该块音频时长除以 median 处理时间。结果用于同一模拟器和构建参数下的回归比较，不能外推到 iQOO arm64 真机。当前工具还没有 RSS、分配计数或完整的 5 采样率 × 6 缓冲区矩阵，DG-015 保持未完成。DG-014 的 true-peak limiter 接入仍待单独实现。
+
+---
+
 ## 2026-11-12 — 第 34 轮 DG-014 analyzer 独立构建与模拟器测试
 
 **任务** DG-014 第一轮 true-peak analyzer。上一轮由 Flash 写入代码，本轮由 Codex 独立编译和运行。
