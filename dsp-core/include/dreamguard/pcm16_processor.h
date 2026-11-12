@@ -1,63 +1,23 @@
-/* DreamGuard DSP core - PCM16 <-> compressor bridge (DG-022).
+/* DreamGuard DSP core - native-endian PCM16 dynamics bridge (DG-022).
  *
- * STATUS: DEVICE-LINK UNVERIFIED. The bridge and its C++ suite passed 206/0
- * on an API 35 x86_64 emulator. The wrapped compressor has separate 348/0
- * signal-level evidence, while physical-device playback remains unverified.
- * host test evidence; see docs/STATUS.md.
+ * Zero-initialize config. Default is the zero-latency compressor-only path.
+ * limiter_enabled=1 adds the DG-014 conservative 4x guard after compression,
+ * ceiling -1 dBFS, linked stereo, 100 ms release, 64 frames of latency.
+ * Android enables this mode. Process emits one output frame per input frame,
+ * initially silence; drain emits the retained tail at EOS/before bypass. The
+ * stream is therefore 64 frames longer, 1.333 ms at 48 kHz or 8 ms at 8 kHz.
+ * No audio content is omitted at a normal EOS. Reset/seek discards the old tail.
+ * Quantization may add less than 0.001 dB at the fixed ceiling.
  *
- * Why this exists
- * ---------------
- * The DG-013 compressor processes interleaved Float32 PCM. Android local-file
- * playback through Media3 delivers ENCODING_PCM_16BIT buffers. This component
- * is the one place where the two meet: it converts PCM16 to float, runs the
- * compressor, converts back to PCM16, and preserves the byte count (including a
- * trailing partial frame or odd byte). It exists so the JNI bridge stays a thin
- * marshalling layer and so the conversion + DSP path is testable on the host.
+ * PCM conversion uses s/32768, rounds half away from zero, and saturates.
+ * Bypass copies every byte and leaves state untouched. Drain before bypass
+ * when a delayed stream is pending. Compressor-only processing also preserves
+ * partial frames; guard mode rejects partial frames without writing, so the
+ * Android caller can pass them through and report a processing error.
  *
- * It is NOT the soundscape generator, it is NOT a limiter, and it adds NO
- * lookahead: the output is sample-aligned with the input, frame for frame.
- *
- * Signal path
- * -----------
- *   int16 (native endian, interleaved) -> float = s / 32768.0 -> DG-013
- *   compressor (per block, no lookahead) -> int16 = round(clamp(y) * 32768)
- *
- * The round-to-int16 step rounds half away from zero and saturates, so a
- * positive makeup gain produces full-scale samples instead of wrapping. The
- * compressor CAN exceed 0 dBFS by design (DG-013 has no limiter); saturation is
- * the documented behaviour of this bridge, not a true-peak guarantee.
- *
- * Bypass
- * ------
- * With bypass != 0 the function copies input bytes to output verbatim with
- * memmove, so the result is bit-identical even for a partial frame, and no
- * compressor state is touched. This is the property Media3's "processing off"
- * switch relies on.
- *
- * Buffering
- * ---------
- * Any input size is accepted; the implementation converts in fixed-size chunks
- * (DG_PCM16_CHUNK_FRAMES) through a scratch array that lives inside the handle.
- * There is NO allocation on the process path, no lock and no syscall, and the
- * caller does not have to negotiate a block size. `frames` / `bytes_written`
- * in dg_pcm16_processor_values report what the call actually processed.
- *
- * A partial frame at the end of the block (bytes that do not fill a whole
- * frame) is copied to the output unchanged, so output_bytes is always equal to
- * input_bytes.
- *
- * Threading and lifetime
- * ----------------------
- * One handle is driven by one thread at a time: create/destroy/process/reset
- * must be externally serialized, exactly like dg_compressor. reset() is safe
- * between blocks, not during one. The Android layer (LocalAudioProcessor) keeps
- * the handle confined to the playback thread: configure/queueInput/flush/reset
- * all run there, so no lock is needed around the handle and no other thread can
- * observe a destroyed one.
- *
- * Channel counts are the compressor's: 1 or 2. Larger layouts are rejected at
- * create with DG_ERR_CHANNEL_COUNT_OUT_OF_RANGE; the Android layer treats that
- * as "not supported, pass the original bytes through" instead of down-mixing.
+ * Create/destroy allocate, process/reset/drain do not. Access to one handle
+ * must be serialized. The Android owner confines it to the playback thread.
+ * One/two channels, 8000..192000 Hz. See docs/evidence for actual test results.
  */
 
 #ifndef DREAMGUARD_DSP_PCM16_PROCESSOR_H
@@ -84,7 +44,7 @@ extern "C" {
 /* Interleaved mono/stereo PCM16 in the platform's native byte order, plus the
  * DG-013 compressor parameters. The parameter ranges are the compressor's; see
  * dreamguard/compressor.h. link_stereo is 0 or 1 (any other value is rejected
- * by dg_compressor_create). */
+ * by dg_compressor_create). limiter_enabled must be 0 or 1. */
 typedef struct dg_pcm16_processor_config {
     int32_t sample_rate;   /* [DG_SAMPLE_RATE_MIN, DG_SAMPLE_RATE_MAX] */
     int32_t channel_count; /* [DG_PCM_CHANNELS_MIN, DG_PCM_CHANNELS_MAX] */
@@ -95,6 +55,7 @@ typedef struct dg_pcm16_processor_config {
     double release_ms;
     double makeup_gain_db;
     int32_t link_stereo;
+    int32_t limiter_enabled; /* 0 = compressor only, 1 = conservative 4x guard */
 } dg_pcm16_processor_config;
 
 /* Result of the last dg_pcm16_processor_process call. */
@@ -122,7 +83,7 @@ dg_status dg_pcm16_processor_create(const dg_pcm16_processor_config* config,
  *   DG_ERR_NULL_HANDLE handle was NULL */
 dg_status dg_pcm16_processor_destroy(dg_pcm16_processor* processor);
 
-/* Resets the wrapped compressor (gain back to zero dB, counters cleared); the
+/* Resets the compressor and guard, discarding any retained tail; the
  * configuration survives and the scratch buffer is not touched.
  *   DG_OK              reset
  *   DG_ERR_NULL_HANDLE handle was NULL */
@@ -139,7 +100,7 @@ dg_status dg_pcm16_processor_reset(dg_pcm16_processor* processor);
  *   out_values         optional; may be NULL.
  *
  * Byte preservation: bytes_written == input_bytes always, including a trailing
- * partial frame. The identical input/output pointer is allowed (in-place) and
+ * partial frame in compressor-only mode. Guard mode requires whole frames. The identical input/output pointer is allowed (in-place) and
  * produces the same bytes as separate buffers; any other overlap is rejected
  * without writing.
  *
@@ -158,8 +119,14 @@ dg_status dg_pcm16_processor_process(dg_pcm16_processor* processor,
                                      int32_t bypass,
                                      dg_pcm16_processor_values* out_values);
 
-/* Zero frames of algorithmic latency: the compressor has no lookahead. */
-uint32_t dg_pcm16_processor_latency_frames(void);
+/* Optional guard: -1 dBFS, linked, 64 frames of latency (0 when disabled).
+ * Process still writes input_bytes. At EOS or before bypass, drain the retained
+ * tail once. Reset/seek intentionally discards it. No allocation during drain.
+ * Capacity must cover latency * channels * 2 bytes; failure preserves state.
+ * An empty/already-drained stream writes zero bytes. */
+uint32_t dg_pcm16_processor_latency_frames(const dg_pcm16_processor* processor);
+dg_status dg_pcm16_processor_drain(dg_pcm16_processor* processor, void* output,
+                                   uint32_t output_capacity, uint32_t* out_bytes);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -1,4 +1,5 @@
 #include "dreamguard/true_peak.h"
+#include "reconstruction_filter.h"
 
 #include <cmath>
 #include <cstddef>
@@ -12,9 +13,7 @@ constexpr int32_t kMaxChannels = DG_PCM_CHANNELS_MAX;
 constexpr int32_t kOversampling = DG_TRUE_PEAK_OVERSAMPLING;
 constexpr int32_t kTapsPerPhase = 16;
 constexpr int32_t kFilterTaps = kOversampling * kTapsPerPhase + 1; /* 65 */
-constexpr int32_t kFilterCenter = kFilterTaps / 2;                 /* 32 */
 constexpr int32_t kHistory = kTapsPerPhase + 1;                    /* 17 */
-constexpr double kPi = 3.14159265358979323846;
 
 bool in_range(int32_t value, int32_t minimum, int32_t maximum) {
     return value >= minimum && value <= maximum;
@@ -27,52 +26,6 @@ double level_to_db(double peak) {
     return 20.0 * std::log10(clamped);
 }
 
-/* Builds the 4x polyphase interpolator.
- *
- * h[j] = sinc((j - centre) / 4) * blackman(j), j = 0..64. Its cutoff sits at the
- * input Nyquist frequency, one quarter of the upsampled Nyquist, so the imaging
- * copies produced by zero-stuffing fall in the stopband. The windowed-sinc has
- * a DC gain of 4; each polyphase branch is normalised to 1 so a constant input
- * is reproduced exactly.
- *
- * Branch 0 is forced to a pure delay (a single centre tap). That makes the
- * original sample positions part of the true-peak maximum once the 8-frame
- * centre delay has elapsed; a stream shorter than that can under-report the
- * tail (see true_peak.h).
- */
-void build_filter(double coefficients[kOversampling][kHistory]) {
-    double filter[kFilterTaps] = {};
-    const double denominator = static_cast<double>(kFilterTaps - 1);
-    for (int32_t j = 0; j < kFilterTaps; ++j) {
-        const double x =
-            static_cast<double>(j - kFilterCenter) / static_cast<double>(kOversampling);
-        const double sinc = (j == kFilterCenter) ? 1.0 : std::sin(kPi * x) / (kPi * x);
-        const double angle = 2.0 * kPi * static_cast<double>(j) / denominator;
-        const double window = 0.42 - 0.5 * std::cos(angle) + 0.08 * std::cos(2.0 * angle);
-        filter[j] = sinc * window;
-    }
-
-    for (int32_t phase = 0; phase < kOversampling; ++phase) {
-        double sum = 0.0;
-        for (int32_t tap = 0; tap < kHistory; ++tap) {
-            const int32_t j = phase + kOversampling * tap;
-            const double value = j < kFilterTaps ? filter[j] : 0.0;
-            coefficients[phase][tap] = value;
-            sum += value;
-        }
-        if (phase == 0) {
-            /* Exact delayed copy of the input at the sample positions. */
-            for (int32_t tap = 0; tap < kHistory; ++tap) {
-                coefficients[0][tap] = 0.0;
-            }
-            coefficients[0][kFilterCenter / kOversampling] = 1.0;
-        } else if (sum != 0.0) {
-            for (int32_t tap = 0; tap < kHistory; ++tap) {
-                coefficients[phase][tap] /= sum;
-            }
-        }
-    }
-}
 
 }  // namespace
 
@@ -134,7 +87,7 @@ dg_status dg_true_peak_create(const dg_true_peak_config* config,
     }
     true_peak->sample_rate = config->sample_rate;
     true_peak->channel_count = config->channel_count;
-    build_filter(true_peak->coefficients);
+    dreamguard::build_reconstruction_filter(true_peak->coefficients);
     clear_state(true_peak);
     *out_true_peak = true_peak;
     return DG_OK;

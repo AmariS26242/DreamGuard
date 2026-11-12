@@ -1,0 +1,33 @@
+API 35 x86_64 emulator app smoke test, 2026-11-12
+Input: DG36-EOS.wav, 8 seconds, 44100 Hz mono PCM16, sine 997 Hz, amplitude 26000.
+Selected through Android system file picker; no app data cleared.
+Initial processed playback UI showed 本地压缩运行中 (NativeState.ACTIVE), toggle checked.
+MediaSession records below are restricted to DreamGuard; other app sessions omitted.
+processed: state=PlaybackState {state=PLAYING(3), position=3051, buffered position=8000, speed=1.0, updated=15706821, actions=7339999, custom actions=[], active item id=0, error=null}
+eos: state=PlaybackState {state=STOPPED(1), position=8001, buffered position=8000, speed=0.0, updated=15711792, actions=7339999, custom actions=[], active item id=0, error=null}
+bypass: state=PlaybackState {state=PLAYING(3), position=387, buffered position=8000, speed=1.0, updated=15858076, actions=7339999, custom actions=[], active item id=0, error=null}
+replayed: state=PlaybackState {state=PLAYING(3), position=3544, buffered position=8000, speed=1.0, updated=15861081, actions=7339999, custom actions=[], active item id=0, error=null}
+UI eos:
+  已暂停
+  DG36-EOS.wav
+  16-bit PCM · 44100 Hz · 1 ch · 本地压缩运行中
+  processing_checked=true
+UI toggle:
+  已暂停
+  DG36-EOS.wav
+  16-bit PCM · 44100 Hz · 1 ch · 本地压缩运行中
+  processing_checked=true
+UI bypass:
+  播放中
+  DG36-EOS.wav
+  16-bit PCM · 44100 Hz · 1 ch
+  processing_checked=false
+UI resumed:
+  播放中
+  DG36-EOS.wav
+  16-bit PCM · 44100 Hz · 1 ch · 本地压缩就绪
+  processing_checked=true
+AndroidRuntime:E capture after these checks: ''
+No physical-device listening, acoustic output, Bluetooth or long-duration acceptance in this run.
+The full retained tail is verified by native/JVM tests; UI state alone does not prove audio samples.
+Debug APK SHA256=a13ee18c2bfe80962dc735111deb344e36e1788653d70ae81af99008208487fa

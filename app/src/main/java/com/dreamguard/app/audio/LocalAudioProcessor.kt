@@ -8,13 +8,13 @@ import java.nio.ByteBuffer
 
 /**
  * The PCM stage on the Media3 playback path for **local** files, now backed by
- * the real native compressor.
+ * the native compressor and conservative 4x peak guard.
  *
  * Scope and guarantees:
  *
  *  - Input: 16-bit PCM in the platform's native byte order, any sample rate.
  *    Mono and stereo (1–2 channels) go through the DG-022 bridge
- *    (`libdreamguard_dsp.so` → `dg_compressor`); wider layouts are accepted by
+ *    (`libdreamguard_dsp.so` → compressor → peak guard); wider layouts are accepted by
  *    negotiation but passed through byte for byte, because the compressor is a
  *    mono/stereo processor and silently down-mixing would be worse than saying
  *    "not supported".
@@ -32,10 +32,11 @@ import java.nio.ByteBuffer
  *    [nativeState] / [nativeError] so the UI can explain what happened. Local
  *    playback must never go silent because of a DSP problem.
  *
- * What this is NOT: `libdreamguard_dsp.so`'s generative soundscape engine is a
- * different component with its own handle; this stage never touches it. The
- * compressor has no lookahead, so this is not a limiter and makes no true-peak
- * promise.
+ * The guard follows compression, has a -1 dBFS ceiling and retains 64 frames.
+ * At EOS and before bypass the tail is emitted once. Each processed segment
+ * adds 64 silent startup frames (1.333 ms at 48 kHz); seeks discard old state.
+ * Gain changes may still be audible; physical listening is pending. The
+ * generative soundscape uses a separate handle and is unaffected by this stage.
  *
  * Threading and handles: [queueInput], [onConfigure], [onFlush] and [onReset]
  * run on the playback thread, and the native handle is created, used, reset and
@@ -117,6 +118,10 @@ class LocalAudioProcessor internal constructor(
     @Volatile
     private var nativeFormat: AudioProcessor.AudioFormat? = null
 
+    // Accessed only on the playback thread. A switch-off still owes the sink
+    // the end of the preceding processed block before its byte-exact bypass.
+    private var nativeTailPending = false
+
     /** Whether the negotiated layout is one the compressor supports (1–2 ch). */
     @Volatile
     private var nativeLayout: Boolean = false
@@ -191,11 +196,12 @@ class LocalAudioProcessor internal constructor(
             return
         }
         val remaining = inputBuffer.remaining()
-        val output = replaceOutputBuffer(remaining)
+        val output = replaceOutputBuffer(remaining + MAX_DRAIN_BYTES)
         val inputPosition = inputBuffer.position()
         val outputPosition = output.position()
 
         if (!processingEnabled) {
+            output.position(drainNative(output))
             // Bit-exact bypass: copy every byte, including a possible odd tail.
             output.put(inputBuffer)
             output.flip()
@@ -224,6 +230,7 @@ class LocalAudioProcessor internal constructor(
                 -1
             }
             if (written == remaining) {
+                nativeTailPending = true
                 inputBuffer.position(inputPosition + remaining)
                 output.position(outputPosition + written)
                 output.flip()
@@ -246,6 +253,7 @@ class LocalAudioProcessor internal constructor(
         }
 
         // Safe fallback: identical bytes, no matter why the native path is gone.
+        nativeTailPending = false
         output.put(inputBuffer)
         output.flip()
         nativeState = if (nativeError != null) NativeState.ERROR else enabledState()
@@ -255,7 +263,35 @@ class LocalAudioProcessor internal constructor(
     @Volatile
     private var released: Boolean = false
 
+    override fun onQueueEndOfStream() {
+        if (!nativeTailPending) return
+        val output = replaceOutputBuffer(MAX_DRAIN_BYTES)
+        output.position(drainNative(output))
+        output.flip()
+    }
+
+    private fun drainNative(output: ByteBuffer): Int {
+        if (!nativeTailPending) return 0
+        nativeTailPending = false
+        if (nativeHandle == 0L || nativeError != null) return 0
+        val written = try {
+            compressor.drain(nativeHandle, output, 0)
+        } catch (error: Throwable) {
+            nativeError = "native drain threw ${error.javaClass.simpleName}"
+            nativeState = NativeState.ERROR
+            return 0
+        }
+        val frameBytes = (nativeFormat?.channelCount ?: 1) * 2
+        if (written !in 0..MAX_DRAIN_BYTES || written % frameBytes != 0) {
+            nativeError = "native drain failed ($written)"
+            nativeState = NativeState.ERROR
+            return 0
+        }
+        return written
+    }
+
     override fun onFlush() {
+        nativeTailPending = false
         if (released) {
             // A sink that resets its processors after the owner released the player
             // must not resurrect a native handle that nothing will use or free.
@@ -347,6 +383,7 @@ class LocalAudioProcessor internal constructor(
     }
 
     private fun closeNative() {
+        nativeTailPending = false
         val handle = nativeHandle
         nativeHandle = 0L
         nativeFormat = null
@@ -378,6 +415,7 @@ class LocalAudioProcessor internal constructor(
 
         private const val MIN_NATIVE_CHANNELS = 1
         private const val MAX_NATIVE_CHANNELS = 2
+        private const val MAX_DRAIN_BYTES = 64 * MAX_NATIVE_CHANNELS * 2
     }
 }
 

@@ -1,45 +1,4 @@
-// Tests for the DG-022 PCM16 <-> compressor bridge.
-//
-// Run on the host through CTest, same style as the other test programs.
-//
-// What these tests establish:
-//   * create() validation: unsupported channel counts get the specific
-//     channel error, bad compressor parameters are rejected by the wrapped
-//     DG-013 validation, and a failed create clears its out-parameter;
-//   * NULL handle/pointer handling and the zero-byte no-op;
-//   * bypass is byte-exact, including a trailing partial frame/odd byte, and it
-//     works in place;
-//   * conversion is exact: with ratio 1 and no makeup gain every one of the
-//     65 536 int16 values round-trips bit for bit;
-//   * a -6.02 dB makeup gain halves even samples (within one LSB of float
-//     rounding) and saturation clamps instead of wrapping;
-//   * a constant full-scale block converges to the compressor's static curve
-//     (threshold -20 dBFS, 2:1 -> -10 dB) and reset() restores unity gain;
-//   * stereo linking attenuates a quiet channel together with a loud one while
-//     unlinked processing leaves it alone;
-//   * chunking the same stream produces bit-identical bytes, so the caller does
-//     not have to negotiate a block size;
-//   * a bypass block leaves the wrapped compressor's envelope exactly where it
-//     was, so switching the Media3 toggle does not restart the dynamics;
-//   * a partial frame at the end of the block is copied verbatim so the byte
-//     count never changes; the same holds for a stereo partial frame and for a
-//     partially-filled frame, and the reported frame count covers whole frames
-//     only;
-//   * undersized output, NULL pointers and partial overlap are rejected without
-//     touching the output;
-//   * the identical input/output pointer is allowed and matches separate buffers;
-//   * a new handle can be created for a different rate/layout after destroying
-//     the old one (format change);
-//   * the bridge reports zero algorithmic latency.
-//
-// What these tests do NOT establish: no listening test, no device run, no
-// true-peak behaviour (the bridge is not a limiter), and no claim that the
-// chosen attack/release values sound like any particular processor. The "no
-// allocation on the process path" property is enforced by code inspection (the
-// only buffer is the scratch array inside the handle); a test cannot prove it.
-//
-// STATUS: UNVERIFIED. Written in rounds 22-23; the authoring environment could not
-// execute commands, so none of these tests has been compiled or run.
+// PCM16 compressor/guard, conversion, bypass, lifecycle and complete-tail regressions.
 
 #include <algorithm>
 #include <cmath>
@@ -52,6 +11,7 @@
 #include <vector>
 
 #include "dreamguard/pcm16_processor.h"
+#include "dreamguard/true_peak.h"
 
 namespace {
 
@@ -865,7 +825,65 @@ void a_new_format_gets_a_fresh_handle() {
 }
 
 void latency_is_zero() {
-    CHECK(dg_pcm16_processor_latency_frames() == 0);
+    CHECK(dg_pcm16_processor_latency_frames(NULL) == 0);
+}
+
+void limiter_tail_and_pcm_safety() {
+    for (int rate : {8000, 44100, 48000, 96000, 192000}) for (int channels : {1, 2}) {
+        auto config = unity_config(rate, channels);
+        config.limiter_enabled = 1;
+        auto* handle = create_or_null(config);
+        CHECK(handle != nullptr);
+        if (!handle) continue;
+        CHECK(dg_pcm16_processor_latency_frames(handle) == 64);
+        std::vector<uint8_t> tail(64 * channels * 2, 0x55);
+        uint32_t written = 999;
+        EXPECT_STATUS(dg_pcm16_processor_drain(handle, tail.data(), tail.size(), &written), DG_OK);
+        CHECK(written == 0);
+        // Quiet, very short stream must survive, including its last frame.
+        std::vector<int16_t> quiet(3 * channels, 1000);
+        auto input = encode(quiet);
+        std::vector<uint8_t> output(input.size());
+        EXPECT_STATUS(process(handle, input, output, 0), DG_OK);
+        CHECK(output == std::vector<uint8_t>(input.size(), 0));
+        EXPECT_STATUS(dg_pcm16_processor_drain(handle, tail.data(), tail.size()-1, &written), DG_ERR_INVALID_ARGUMENT);
+        CHECK(written == 0); // Insufficient capacity did not consume the tail.
+        EXPECT_STATUS(dg_pcm16_processor_drain(handle, tail.data(), tail.size(), &written), DG_OK);
+        CHECK(written == tail.size());
+        auto decoded = decode(tail);
+        CHECK(std::vector<int16_t>(decoded.end() - quiet.size(), decoded.end()) == quiet);
+        EXPECT_STATUS(dg_pcm16_processor_drain(handle, tail.data(), tail.size(), &written), DG_OK);
+        CHECK(written == 0);
+        // Guard after positive makeup gain: full PCM path, including quantization.
+        EXPECT_STATUS(dg_pcm16_processor_destroy(handle), DG_OK);
+        config.makeup_gain_db = 12;
+        handle = create_or_null(config);
+        std::vector<int16_t> loud(4093 * channels);
+        for (int n = 0; n < 4093; ++n) for (int ch = 0; ch < channels; ++ch)
+            loud[n * channels + ch] = static_cast<int16_t>(30000 * std::sin(1.5707963267948966 * n + 0.7853981633974483));
+        input = encode(loud); output.resize(input.size());
+        EXPECT_STATUS(process(handle, input, output, 0), DG_OK);
+        EXPECT_STATUS(dg_pcm16_processor_drain(handle, tail.data(), tail.size(), &written), DG_OK);
+        output.insert(output.end(), tail.begin(), tail.end());
+        decoded = decode(output);
+        std::vector<float> measured(decoded.size() + 16 * channels, 0);
+        for (size_t n = 0; n < decoded.size(); ++n) measured[n] = decoded[n] / 32768.0F;
+        dg_true_peak* meter = nullptr; dg_true_peak_config mc{rate, channels};
+        EXPECT_STATUS(dg_true_peak_create(&mc, &meter), DG_OK);
+        EXPECT_STATUS(dg_true_peak_process(meter, {measured.data(), static_cast<uint32_t>(measured.size()/channels), channels}), DG_OK);
+        dg_true_peak_values values{}; dg_true_peak_snapshot(meter, &values);
+        CHECK(values.total_true_peak_dbfs <= -1.0 + 0.001); // PCM16 rounding allowance.
+        EXPECT_STATUS(dg_true_peak_destroy(meter), DG_OK);
+        EXPECT_STATUS(dg_pcm16_processor_reset(handle), DG_OK);
+        EXPECT_STATUS(dg_pcm16_processor_drain(handle, tail.data(), tail.size(), &written), DG_OK);
+        CHECK(written == 0);
+        input.resize(1); output.assign(1, 0x55);
+        EXPECT_STATUS(process(handle, input, output, 0), DG_ERR_INVALID_ARGUMENT);
+        CHECK(output[0] == 0x55);
+        EXPECT_STATUS(process(handle, input, output, 1), DG_OK);
+        CHECK(output == input);
+        EXPECT_STATUS(dg_pcm16_processor_destroy(handle), DG_OK);
+    }
 }
 
 }  // namespace
@@ -911,6 +929,7 @@ int main() {
         in_place_processing_matches_separate_buffers);
     run("a new format gets a fresh handle", a_new_format_gets_a_fresh_handle);
     run("latency is zero", latency_is_zero);
+    run("limiter PCM safety, drain, reset and short-stream tails", limiter_tail_and_pcm_safety);
 
     std::printf("%d checks, %d failure(s)\n", g_checks, g_failures);
     if (g_failures != 0) {

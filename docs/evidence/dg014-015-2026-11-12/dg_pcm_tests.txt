@@ -1,0 +1,27 @@
+dg_pcm_tests: portable Float32 PCM helpers (DG-011)
+  bypass preserves every bit (mono)
+  bypass preserves every bit (stereo)
+  bypass keeps NaN bit patterns
+  bypass accepts an empty block
+  bypass rejects bad descriptors
+  bypass accepts an identical buffer
+  bypass rejects partial overlap
+  gain 1.0 is bit exact for finite samples
+  gain scales samples
+  gain rejects out-of-contract values
+  gain accepts an identical buffer
+  gain rejects partial overlap
+  map mono to stereo duplicates
+  map stereo to mono averages
+  map same layout is bit exact
+  map rejects bad shapes
+  map same layout accepts an identical buffer
+  map channel conversion rejects aliasing
+  silence is detected
+  silence of an empty block is true
+  silence rejects bad arguments
+  bypass is the identity for every supported frame count
+  large block round trip
+  silent input produces silent output
+139 checks, 0 failure(s)
+PASSED

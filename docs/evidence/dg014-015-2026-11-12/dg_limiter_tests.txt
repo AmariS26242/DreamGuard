@@ -1,0 +1,22 @@
+dg_limiter tests (DG-014, sample and conservative 4x true-peak bounds)
+PASS create validation
+PASS null handles and descriptor validation
+PASS latency and pass-through
+PASS impulse latency
+PASS sample-peak bound across rates, ceilings and lookaheads
+PASS stereo link
+PASS chunking invariance
+PASS full window with increasing required gain
+PASS flush tail
+PASS reset
+PASS in-place aliasing
+PASS non-finite input
+PASS extremes
+PASS rate and channel smoke
+  true-peak gap: ceiling -2.000 dBFS, output sample peak -2.000 dBFS, true peak 1.012 dBFS, overshoot 3.01 dB
+PASS true-peak gap evidence (measurement only)
+PASS optional true-peak detector
+  conservative 4x bound: 120 cases, full tails and chunk equality
+PASS true-peak safety matrix
+PASS true-peak link, reset and validation
+  3706 checks, 0 failures

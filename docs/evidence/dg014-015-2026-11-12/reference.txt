@@ -1,0 +1,4 @@
+ffmpeg version 9.0.2-essentials_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers
+256-frame zero tail, 16x libswresample, filter_size=128, phase_shift=10, cutoff=0.99
+Acceptance: independent reconstruction <= configured ceiling + 0.05 dB.
+This finite fixture comparison is not a broadcast certification.

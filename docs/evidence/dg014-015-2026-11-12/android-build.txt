@@ -1,0 +1,4 @@
+NDK builds: Debug and Release, arm64-v8a / armeabi-v7a / x86_64.
+:app:testDebugUnitTest :app:assembleDebug :app:assembleRelease => BUILD SUCCESSFUL
+Final tests after adding EOS exception regression: 142 tests / 0 failures / 0 skipped
+Debug and Release APKs constructed; release is unsigned for development.

@@ -1,5 +1,8 @@
 #include "dreamguard/limiter.h"
 
+#include "reconstruction_filter.h"
+
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -8,6 +11,7 @@
 namespace {
 
 constexpr int32_t kMaxChannels = DG_PCM_CHANNELS_MAX;
+constexpr int kGuardHistory = DG_LIMITER_TRUE_PEAK_CONTEXT + 1;
 
 bool in_range(double value, double minimum, double maximum) {
     return value >= minimum && value <= maximum;
@@ -33,6 +37,7 @@ struct dg_limiter {
     int32_t sample_rate = 0;
     int32_t channel_count = 0;
     int32_t linked = 1;
+    int32_t true_peak_detection = 0;
     double ceiling_dbfs = 0.0;
     double ceiling_linear = 1.0;
     double release_coefficient = 1.0;
@@ -49,9 +54,14 @@ struct dg_limiter {
     uint32_t deque_count[kMaxChannels] = {};
 
     double gain[kMaxChannels] = {1.0, 1.0};
+    double coefficients[dreamguard::kPhases][kGuardHistory] = {};
+    double bound_coefficients[dreamguard::kPhases][kGuardHistory] = {};
+    double history[kMaxChannels][kGuardHistory] = {};
+    int history_pos = 0;
 
     double block_input_peak = 0.0;
     double block_output_peak = 0.0;
+    double block_input_true_peak = 0.0;
     uint64_t frames = 0;
     uint64_t limited_samples = 0;
     uint64_t over_ceiling_samples = 0;
@@ -76,16 +86,22 @@ void clear_delay_and_window(dg_limiter* limiter) {
     }
     limiter->delay_pos = 0;
     limiter->window_index = 0;
+    limiter->history_pos = 0;
+    for (auto& channel : limiter->history) {
+        for (double& value : channel) value = 0.0;
+    }
 }
 
 void reset_state(dg_limiter* limiter) {
     limiter->block_input_peak = 0.0;
     limiter->block_output_peak = 0.0;
+    limiter->block_input_true_peak = 0.0;
     limiter->frames = 0;
     limiter->limited_samples = 0;
     limiter->over_ceiling_samples = 0;
     limiter->non_finite_samples = 0;
     clear_delay_and_window(limiter);
+
 }
 
 /* Adds one required gain to the sliding-minimum deque of one channel.
@@ -173,6 +189,9 @@ dg_status dg_limiter_create(const dg_limiter_config* config, dg_limiter** out_li
     if (config->link_stereo != 0 && config->link_stereo != 1) {
         return DG_ERR_INVALID_ARGUMENT;
     }
+    if (config->true_peak_detection != 0 && config->true_peak_detection != 1) {
+        return DG_ERR_INVALID_ARGUMENT;
+    }
 
     dg_limiter* limiter = new (std::nothrow) dg_limiter{};
     if (limiter == nullptr) {
@@ -182,6 +201,7 @@ dg_status dg_limiter_create(const dg_limiter_config* config, dg_limiter** out_li
     limiter->sample_rate = config->sample_rate;
     limiter->channel_count = config->channel_count;
     limiter->linked = config->link_stereo;
+    limiter->true_peak_detection = config->true_peak_detection;
     limiter->ceiling_dbfs = config->ceiling_dbfs;
     limiter->ceiling_linear = std::pow(10.0, config->ceiling_dbfs / 20.0);
     limiter->release_coefficient =
@@ -192,6 +212,25 @@ dg_status dg_limiter_create(const dg_limiter_config* config, dg_limiter** out_li
     /* ceil() is intentional: the delay must cover the requested time, never
      * round it down. 20 ms at 192 kHz is 3840 frames. */
     limiter->latency_frames = static_cast<uint32_t>(std::ceil(latency));
+    if (limiter->true_peak_detection != 0) {
+        // Every interpolation window containing a sample must be known before
+        // that sample leaves. Longer support also protects HF/noise transients
+        // that the short measurement filter underestimates against a reference.
+        limiter->latency_frames = std::max(limiter->latency_frames,
+            static_cast<uint32_t>(DG_LIMITER_TRUE_PEAK_CONTEXT));
+        dreamguard::build_reconstruction_filter(limiter->coefficients);
+        double short_filter[dreamguard::kPhases][dreamguard::kHistory] = {};
+        dreamguard::build_reconstruction_filter(short_filter);
+        constexpr int shift = (kGuardHistory - dreamguard::kHistory) / 2;
+        for (int phase = 0; phase < dreamguard::kPhases; ++phase) {
+            for (int tap = 0; tap < kGuardHistory; ++tap) {
+                const double short_weight = tap >= shift && tap < shift + dreamguard::kHistory
+                    ? std::fabs(short_filter[phase][tap - shift]) : 0.0;
+                limiter->bound_coefficients[phase][tap] = std::max(short_weight,
+                    std::fabs(limiter->coefficients[phase][tap]));
+            }
+        }
+    }
     limiter->window_size = limiter->latency_frames + 1U;
 
     const std::size_t channels = static_cast<std::size_t>(limiter->channel_count);
@@ -276,11 +315,13 @@ dg_status dg_limiter_process(dg_limiter* limiter, dg_pcm_view input,
 
     double input_peak = 0.0;
     double output_peak = 0.0;
+    limiter->block_input_true_peak = 0.0;
     for (uint32_t frame = 0; frame < frame_count; ++frame) {
         const std::size_t base =
             static_cast<std::size_t>(frame) * static_cast<std::size_t>(channels);
         double values[kMaxChannels] = {0.0, 0.0};
         double magnitude[kMaxChannels] = {0.0, 0.0};
+        double detector_magnitude[kMaxChannels] = {0.0, 0.0};
         for (int32_t ch = 0; ch < channels; ++ch) {
             const double sample =
                 static_cast<double>(source[base + static_cast<std::size_t>(ch)]);
@@ -290,18 +331,42 @@ dg_status dg_limiter_process(dg_limiter* limiter, dg_pcm_view input,
             }
             values[ch] = sample;
             magnitude[ch] = std::fabs(sample);
+            detector_magnitude[ch] = magnitude[ch];
             if (magnitude[ch] > input_peak) {
                 input_peak = magnitude[ch];
             }
+        }
+
+        if (limiter->true_peak_detection != 0) {
+            for (int32_t ch = 0; ch < channels; ++ch) {
+                limiter->history[ch][limiter->history_pos] = values[ch];
+                for (int phase = 0; phase < dreamguard::kPhases; ++phase) {
+                    double reconstructed = 0.0;
+                    double bound = 0.0;
+                    for (int tap = 0; tap < kGuardHistory; ++tap) {
+                        int index = limiter->history_pos - tap;
+                        if (index < 0) index += kGuardHistory;
+                        const double term = limiter->coefficients[phase][tap] *
+                                            limiter->history[ch][index];
+                        reconstructed += term;
+                        bound += limiter->bound_coefficients[phase][tap] *
+                                 std::fabs(limiter->history[ch][index]);
+                    }
+                    limiter->block_input_true_peak = std::max(
+                        limiter->block_input_true_peak, std::fabs(reconstructed));
+                    detector_magnitude[ch] = std::max(detector_magnitude[ch], bound);
+                }
+            }
+            limiter->history_pos = (limiter->history_pos + 1) % kGuardHistory;
         }
 
         /* Required gain for this frame. Linked channels use the loudest one,
          * so the stereo image is preserved; unlinked channels decide alone. */
         double required[kMaxChannels] = {1.0, 1.0};
         if (limiter->linked != 0) {
-            double peak = magnitude[0];
-            if (channels == 2 && magnitude[1] > peak) {
-                peak = magnitude[1];
+            double peak = detector_magnitude[0];
+            if (channels == 2 && detector_magnitude[1] > peak) {
+                peak = detector_magnitude[1];
             }
             const double shared =
                 peak > limiter->ceiling_linear ? limiter->ceiling_linear / peak : 1.0;
@@ -310,8 +375,8 @@ dg_status dg_limiter_process(dg_limiter* limiter, dg_pcm_view input,
             }
         } else {
             for (int32_t ch = 0; ch < channels; ++ch) {
-                required[ch] = magnitude[ch] > limiter->ceiling_linear
-                                   ? limiter->ceiling_linear / magnitude[ch]
+                required[ch] = detector_magnitude[ch] > limiter->ceiling_linear
+                                   ? limiter->ceiling_linear / detector_magnitude[ch]
                                    : 1.0;
             }
         }
@@ -395,19 +460,44 @@ dg_status dg_limiter_flush(dg_limiter* limiter, dg_pcm_buffer output,
     }
 
     const int32_t channels = limiter->channel_count;
-    for (uint32_t frame = 0; frame < latency; ++frame) {
-        const std::size_t base =
-            static_cast<std::size_t>(frame) * static_cast<std::size_t>(channels);
-        for (int32_t ch = 0; ch < channels; ++ch) {
-            const std::size_t delay_base =
-                static_cast<std::size_t>(ch) * static_cast<std::size_t>(latency);
-            const float delayed = limiter->delay[delay_base + limiter->delay_pos];
-            output.samples[base + static_cast<std::size_t>(ch)] =
-                static_cast<float>(static_cast<double>(delayed) * limiter->gain[ch]);
+    if (limiter->true_peak_detection != 0) {
+        // Complete the detector's right-hand context as well as the audio delay.
+        // Processing zeros advances exactly the same envelope as a continued
+        // stream. Preserve the public input counters and last-block meters.
+        const auto saved_frames = limiter->frames;
+        const auto saved_limited = limiter->limited_samples;
+        const auto saved_nonfinite = limiter->non_finite_samples;
+        const auto saved_over = limiter->over_ceiling_samples;
+        const double saved_input = limiter->block_input_peak;
+        const double saved_output = limiter->block_output_peak;
+        const double saved_true = limiter->block_input_true_peak;
+        const float zeros[kMaxChannels] = {};
+        for (uint32_t frame = 0; frame < latency; ++frame) {
+            dg_limiter_process(limiter, {zeros, 1, channels},
+                               {output.samples + frame * channels, 1, channels});
         }
-        ++limiter->delay_pos;
-        if (limiter->delay_pos == latency) {
-            limiter->delay_pos = 0;
+        limiter->frames = saved_frames;
+        limiter->limited_samples = saved_limited;
+        limiter->non_finite_samples = saved_nonfinite;
+        limiter->over_ceiling_samples = saved_over;
+        limiter->block_input_peak = saved_input;
+        limiter->block_output_peak = saved_output;
+        limiter->block_input_true_peak = saved_true;
+    } else {
+        for (uint32_t frame = 0; frame < latency; ++frame) {
+            const std::size_t base =
+                static_cast<std::size_t>(frame) * static_cast<std::size_t>(channels);
+            for (int32_t ch = 0; ch < channels; ++ch) {
+                const std::size_t delay_base =
+                    static_cast<std::size_t>(ch) * static_cast<std::size_t>(latency);
+                const float delayed = limiter->delay[delay_base + limiter->delay_pos];
+                output.samples[base + static_cast<std::size_t>(ch)] =
+                    static_cast<float>(static_cast<double>(delayed) * limiter->gain[ch]);
+            }
+            ++limiter->delay_pos;
+            if (limiter->delay_pos == latency) {
+                limiter->delay_pos = 0;
+            }
         }
     }
     *out_frames = latency;
@@ -444,6 +534,8 @@ dg_status dg_limiter_snapshot(const dg_limiter* limiter,
     values.non_finite_samples = limiter->non_finite_samples;
     values.latency_frames = limiter->latency_frames;
     values.linked = limiter->linked;
+    values.true_peak_detection = limiter->true_peak_detection;
+    values.input_true_peak_db = level_to_db(limiter->block_input_true_peak);
     *out_values = values;
     return DG_OK;
 }

@@ -90,6 +90,7 @@ class NativePcmProcessorContractTest {
         private val EXPECTED_NATIVE_METHODS = listOf(
             "nativeCreate",
             "nativeDestroy",
+            "nativeDrain",
             "nativeProcess",
             "nativeReset",
             "nativeVersion",

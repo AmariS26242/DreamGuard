@@ -88,6 +88,9 @@ class LocalAudioProcessorTest {
         var resetCalls = 0
         var processCalls = 0
         var failProcess = false
+        var drainResult = 0
+        var drainCalls = 0
+        var throwDrain = false
         var requireDirectInput = false
         var lastHandle = 0L
         var lastInputLength = 0
@@ -136,9 +139,108 @@ class LocalAudioProcessorTest {
             resetCalls++
         }
 
+        override fun drain(handle: Long, output: ByteBuffer, outputOffset: Int): Int {
+            drainCalls++
+            if (throwDrain) error("drain failure")
+            if (drainResult > 0 && drainResult <= 64) {
+                repeat(drainResult) { output.put(outputOffset + it, 0x42.toByte()) }
+            }
+            return drainResult
+        }
+
         override fun destroy(handle: Long) {
             destroyed += handle
         }
+    }
+
+    @Test
+    fun `EOS emits the retained tail exactly once`() {
+        val fake = FakeCompressor().apply { drainResult = 64 }
+        val processor = configured(LocalAudioProcessor(fake))
+        processor.setProcessingEnabled(true)
+        processor.queueInput(samples(1000, -1000))
+        processor.output.toByteArray()
+        processor.queueEndOfStream()
+        assertFalse(processor.isEnded)
+        assertArrayEquals(ByteArray(64) { 0x42 }, processor.output.toByteArray())
+        assertTrue(processor.isEnded)
+        processor.queueEndOfStream()
+        assertEquals(0, processor.output.remaining())
+        assertEquals(1, fake.drainCalls)
+    }
+
+    @Test
+    fun `switching off emits old tail before exact bypass and resumes cleanly`() {
+        val fake = FakeCompressor().apply { drainResult = 4 }
+        val processor = configured(LocalAudioProcessor(fake))
+        processor.setProcessingEnabled(true)
+        processor.queueInput(samples(1000, -1000))
+        processor.output.toByteArray()
+        processor.setProcessingEnabled(false)
+        processor.queueInput(bytes(0x12, 0x34, 0x56))
+        assertArrayEquals(byteArrayOf(0x42, 0x42, 0x42, 0x42, 0x12, 0x34, 0x56), processor.output.toByteArray())
+        processor.queueInput(bytes(1, 2, 3))
+        assertArrayEquals(byteArrayOf(1, 2, 3), processor.output.toByteArray())
+        assertEquals(1, fake.drainCalls)
+        processor.setProcessingEnabled(true)
+        processor.queueInput(samples(2000, -2000))
+        val result = processor.output.order(ByteOrder.nativeOrder())
+        assertEquals(1000.toShort(), result.short)
+        assertEquals((-1000).toShort(), result.short)
+        assertEquals(LocalAudioProcessor.NativeState.ACTIVE, processor.nativeState)
+    }
+
+    @Test
+    fun `seek discards old tail and EOS of a bypass stream emits none`() {
+        val fake = FakeCompressor().apply { drainResult = 64 }
+        val processor = configured(LocalAudioProcessor(fake))
+        processor.setProcessingEnabled(true)
+        processor.queueInput(samples(1000, -1000))
+        processor.output.toByteArray()
+        processor.flush()
+        processor.queueEndOfStream()
+        assertEquals(0, processor.output.remaining())
+        assertEquals(0, fake.drainCalls)
+        processor.flush()
+        processor.setProcessingEnabled(false)
+        processor.queueInput(samples(1000, -1000))
+        processor.output.toByteArray()
+        processor.queueEndOfStream()
+        assertEquals(0, processor.output.remaining())
+        assertEquals(0, fake.drainCalls)
+    }
+
+    @Test
+    fun `drain errors preserve bypass bytes and report a failure`() {
+        for (result in listOf(-4, 65, 3)) {
+            val fake = FakeCompressor().apply { drainResult = result }
+            val processor = configured(LocalAudioProcessor(fake))
+            processor.setProcessingEnabled(true)
+            processor.queueInput(samples(1000, -1000))
+            processor.output.toByteArray()
+            processor.setProcessingEnabled(false)
+            processor.queueInput(bytes(1, 2, 3))
+            assertArrayEquals(byteArrayOf(1, 2, 3), processor.output.toByteArray())
+            assertNotNull(processor.nativeFailure)
+            processor.setProcessingEnabled(true)
+            assertEquals(LocalAudioProcessor.NativeState.ERROR, processor.nativeState)
+            processor.flush()
+            assertNull(processor.nativeFailure)
+        }
+    }
+
+    @Test
+    fun `an EOS drain exception ends safely and exposes the error`() {
+        val fake = FakeCompressor().apply { throwDrain = true }
+        val processor = configured(LocalAudioProcessor(fake))
+        processor.setProcessingEnabled(true)
+        processor.queueInput(samples(1000, -1000))
+        processor.output.toByteArray()
+        processor.queueEndOfStream()
+        assertEquals(0, processor.output.remaining())
+        assertTrue(processor.isEnded)
+        assertEquals(LocalAudioProcessor.NativeState.ERROR, processor.nativeState)
+        assertNotNull(processor.nativeFailure)
     }
 
     @Test

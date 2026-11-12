@@ -8,6 +8,13 @@ feed-forward compressor**, the **DG-014 sample-peak lookahead limiter**, the
 Android local playback reach the compressor over JNI. No Android, no JNI, no platform headers: the same sources build for the host
 (tests) and for Android (as a subdirectory of `app/src/main/cpp/CMakeLists.txt`).
 
+> Current DG-014/015 stage (2026-11-12): the optional conservative 4x guard is
+> integrated after local PCM16 compression. It retains 64 frames; drain at EOS
+> or before bypass preserves the full tail. Native/JVM and independent 16x
+> reference checks pass. The 300-row benchmark, reproduction scripts and limits
+> are in [stage evidence](../docs/evidence/dg014-015-2026-11-12/README.md).
+> Later sections include historical iterations; physical listening is pending.
+
 > **DG-012 is `IN_PROGRESS`, not verified.** The meter and LUFS sources are now
 > compiled and tested on Android x86_64 (API 35 emulator): `dg_meter` 207 checks /
 > 0 failures, `dg_lufs` 238 / 0, extended C-header smoke passed, and Debug/Release

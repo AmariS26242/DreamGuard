@@ -1,0 +1,18 @@
+dg_compressor tests (DG-013)
+  create validation
+  null handles and descriptor validation
+  static curve
+  ratio 1 pass-through
+  steady-state gain reduction
+  soft knee on a stream
+  attack and release law
+  sine bound
+  stereo link
+  reset
+  chunking invariance
+  no-click gain steps
+  makeup gain and clipping
+  non-finite input
+  in-place aliasing
+  rate and channel smoke
+  348 checks, 0 failures

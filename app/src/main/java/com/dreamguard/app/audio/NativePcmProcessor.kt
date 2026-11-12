@@ -23,9 +23,9 @@ import java.nio.ByteBuffer
  * the app uses. `makeup = -6.02 dB` keeps the loudness floor of the earlier
  * fixed -6 dB attenuation for quiet material; the compressor only adds gain
  * reduction above -18 dBFS. Attack/release are on the slow side so normal
- * programme material is not pumped. These are NOT true-peak limiter settings:
- * the bridge has no lookahead and can saturate on a positive makeup gain, which
- * is why makeup is negative here.
+ * programme material is not pumped. A linked -1 dBFS conservative 4x guard
+ * follows compression, with 64-frame latency. The owner must call drain at
+ * EOS/before bypass to retain the complete stream. Reset discards the tail.
  */
 internal object NativePcmProcessor {
 
@@ -104,6 +104,9 @@ internal object NativePcmProcessor {
 
     fun reset(handle: Long): Int = if (isAvailable) nativeReset(handle) else ERROR_NULL_HANDLE
 
+    fun drain(handle: Long, output: ByteBuffer, outputOffset: Int): Int =
+        if (isAvailable) nativeDrain(handle, output, outputOffset) else ERROR_NULL_HANDLE
+
     fun destroy(handle: Long): Int = if (isAvailable) nativeDestroy(handle) else ERROR_NULL_HANDLE
 
     fun version(): String = if (isAvailable) nativeVersion() else "native unavailable"
@@ -134,6 +137,8 @@ internal object NativePcmProcessor {
     ): Int
 
     private external fun nativeReset(handle: Long): Int
+
+    private external fun nativeDrain(handle: Long, output: ByteBuffer, outputOffset: Int): Int
 
     private external fun nativeDestroy(handle: Long): Int
 

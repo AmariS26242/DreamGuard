@@ -192,6 +192,7 @@ Java_com_dreamguard_app_audio_NativePcmProcessor_nativeCreate(
     config.release_ms = static_cast<double>(releaseMs);
     config.makeup_gain_db = static_cast<double>(makeupGainDb);
     config.link_stereo = (linkStereo == JNI_TRUE) ? 1 : 0;
+    config.limiter_enabled = 1;
 
     dg_pcm16_processor* processor = nullptr;
     if (dg_pcm16_processor_create(&config, &processor) != DG_OK) {
@@ -247,6 +248,22 @@ Java_com_dreamguard_app_audio_NativePcmProcessor_nativeProcess(
         return pcm16_error_code(status);
     }
     return static_cast<jint>(values.bytes_written);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_dreamguard_app_audio_NativePcmProcessor_nativeDrain(
+        JNIEnv* env, jobject, jlong handle, jobject output, jint outputOffset) {
+    auto* processor = pcm16_from(handle);
+    if (processor == nullptr) return kPcm16NullHandle;
+    if (output == nullptr || outputOffset < 0) return kPcm16InvalidArgument;
+    const jlong capacity = env->GetDirectBufferCapacity(output);
+    auto* address = static_cast<uint8_t*>(env->GetDirectBufferAddress(output));
+    if (capacity < 0 || address == nullptr) return kPcm16NotDirect;
+    if (outputOffset > capacity || capacity - outputOffset > UINT32_MAX) return kPcm16InvalidArgument;
+    uint32_t bytes = 0;
+    const auto status = dg_pcm16_processor_drain(processor, address + outputOffset,
+        static_cast<uint32_t>(capacity - outputOffset), &bytes);
+    return status == DG_OK ? static_cast<jint>(bytes) : pcm16_error_code(status);
 }
 
 JNIEXPORT jint JNICALL

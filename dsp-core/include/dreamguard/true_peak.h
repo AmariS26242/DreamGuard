@@ -1,8 +1,8 @@
 /* DreamGuard DSP core - 4x oversampled true-peak analyser (DG-014).
  *
- * STATUS: NEW in this round, written but NOT compiled or run in the authoring
- * environment. See docs/STATUS.md and docs/DEVLOG.md for the exact boundary; it
- * has not been run on a physical device and it is not wired into playback.
+ * STATUS: Native signal regressions passed on the API 35 x86_64 emulator.
+ * Independent limiter-output comparisons are recorded in docs/evidence.
+ * Physical-device listening is pending. This analyser itself is measurement only.
  *
  * What this is
  * ------------
@@ -42,13 +42,13 @@
  * DG_TRUE_PEAK_FILTER_LATENCY more frames after a sample before that sample
  * reaches the centre tap. A stream that ends immediately after a transient can
  * therefore report a true peak lower than the steady-state reconstruction.
- * There is no flush call in this round; process a few zero frames if a complete
+ * There is no flush call in this round; process 16 zero frames if a complete
  * tail is required. The block/total sample peaks are not affected by this
  * delay.
  *
  * Numeric boundaries
  * ------------------
- *   - zero input: peaks are 0 and their dBFS values are -INFINITY;
+ *   - zero input: peaks are 0 and their dBFS values are -240 dBFS;
  *   - NaN and +/-Inf are not trusted: each is counted in non_finite_samples,
  *     replaced by 0 in the interpolation history, and contributes 0 to every
  *     peak. A snapshot value is never NaN or Inf because of a bad input sample;

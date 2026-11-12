@@ -1,16 +1,10 @@
-/* Host tests for the DG-014 sample-peak lookahead limiter.
- *
- * The limiter tests deliberately check a SAMPLE bound. One additional test at
- * the end feeds the limiter output to the DG-014 4x true-peak analyser to show
- * that the current limiter can still overshoot the inter-sample peak. That test
- * measures the gap only: it does not change the limiter algorithm, and a passing
- * run must never be reported as true-peak acceptance.
- */
+// DG-014: legacy sample limiting plus conservative 4x bound and EOS regressions.
 
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <vector>
 
@@ -818,6 +812,136 @@ void test_true_peak_gap_evidence() {
         measured.total_true_peak_dbfs - config.ceiling_dbfs);
 }
 
+void test_optional_true_peak_detector() {
+    dg_limiter_config config = base_config(48000, 1);
+    config.ceiling_dbfs = -2.0;
+    config.lookahead_ms = 2.0;
+    config.release_ms = 50.0;
+    config.true_peak_detection = 1;
+
+    const std::size_t frames = 19200;
+    std::vector<float> input(frames, 0.0F);
+    for (std::size_t n = 0; n < frames; ++n) {
+        input[n] = static_cast<float>(1.2 * std::sin(
+            kPi * static_cast<double>(n) / 2.0 + kPi / 4.0));
+    }
+
+    const RunResult result = run_stream(config, input);
+    CHECK(result.created && result.processed && result.flushed);
+    if (!result.processed) {
+        return;
+    }
+    CHECK(result.values.true_peak_detection == 1);
+    CHECK(result.values.input_true_peak_db > 0.0);
+
+    dg_true_peak_config analyzer_config{48000, 1};
+    dg_true_peak* analyzer = nullptr;
+    EXPECT_STATUS(dg_true_peak_create(&analyzer_config, &analyzer), DG_OK);
+    if (analyzer == nullptr) {
+        CHECK(false);
+        return;
+    }
+    EXPECT_STATUS(dg_true_peak_process(analyzer, view_of(result.output, 1)), DG_OK);
+    dg_true_peak_values measured{};
+    EXPECT_STATUS(dg_true_peak_snapshot(analyzer, &measured), DG_OK);
+    EXPECT_STATUS(dg_true_peak_destroy(analyzer), DG_OK);
+
+    const double ceiling = dbfs_to_linear(config.ceiling_dbfs);
+    CHECK(measured.total_sample_peak_linear <= ceiling + 1e-4);
+    CHECK(measured.total_true_peak_linear <= ceiling * (1.0 + 1e-6));
+}
+
+void test_true_peak_safety_matrix() {
+    const int rates[] = {8000, 44100, 48000, 96000, 192000};
+    const char* export_dir = std::getenv("DG_TRUE_PEAK_EXPORT");
+    unsigned random = 420137;
+    int cases = 0;
+    for (int rate : rates) for (int channels : {1, 2}) for (int linked : {0, 1}) {
+        for (int shape = 0; shape < 6; ++shape) {
+            auto config = base_config(rate, channels);
+            config.true_peak_detection = 1;
+            config.lookahead_ms = shape % 2 == 0 ? 0.0 : 2.0;
+            config.release_ms = 1.0; // Hardest gain modulation, not a steady envelope.
+            config.link_stereo = linked;
+            config.ceiling_dbfs = shape == 5 ? -60.0 : -2.0;
+            const int frames = shape == 0 ? 1 : (shape == 1 ? 9 : 4093);
+            std::vector<float> input(frames * channels);
+            for (int n = 0; n < frames; ++n) for (int ch = 0; ch < channels; ++ch) {
+                random = 1664525U * random + 1013904223U;
+                double value = 0.0;
+                switch (shape) {
+                    case 0: value = 8.0; break; // Single-frame stream, shorter than delay.
+                    case 1: value = n == frames - 1 ? -7.0 : 0.0; break; // Final impulse.
+                    case 2: value = 2.0 * std::sin(kPi * n / 2 + kPi / 4 + ch * 0.3); break;
+                    case 3: value = (n % 100 < 20 ? 6.0 : 0.02) *
+                                    std::sin(2 * kPi * 0.47 * n + ch); break;
+                    case 4: value = n % 127 == 0 ? 20.0 : (n < 2048 ? 1.2 : -1.2); break;
+                    case 5: value = (static_cast<int>(random >> 8) / 8388608.0 - 1.0) * 30; break;
+                }
+                input[n * channels + ch] = static_cast<float>(value * (ch ? 0.01 : 1.0));
+            }
+            auto whole = run_stream(config, input);
+            auto split = run_stream(config, input, shape + 1);
+            CHECK(whole.created && whole.processed && whole.flushed);
+            CHECK(whole.output == split.output);
+            CHECK(whole.values.over_ceiling_samples == 0);
+            CHECK(whole.values.frames == static_cast<unsigned>(frames));
+            CHECK(whole.latency >= 16);
+            // Include the complete interpolation tail in the acceptance meter.
+            whole.output.resize(whole.output.size() + 16 * channels, 0.0F);
+            dg_true_peak* analyzer = nullptr;
+            dg_true_peak_config ac{rate, channels};
+            EXPECT_STATUS(dg_true_peak_create(&ac, &analyzer), DG_OK);
+            EXPECT_STATUS(dg_true_peak_process(analyzer, view_of(whole.output, channels)), DG_OK);
+            dg_true_peak_values values{};
+            EXPECT_STATUS(dg_true_peak_snapshot(analyzer, &values), DG_OK);
+            CHECK(values.total_true_peak_linear <= dbfs_to_linear(config.ceiling_dbfs) * (1 + 1e-6));
+            if (export_dir != nullptr) {
+                char path[1024];
+                std::snprintf(path, sizeof(path), "%s/tp_%d_%d_%d_%d.f32", export_dir,
+                              rate, channels, linked, shape);
+                FILE* file = std::fopen(path, "wb");
+                CHECK(file != nullptr);
+                if (file) {
+                    CHECK(std::fwrite(whole.output.data(), sizeof(float), whole.output.size(), file) == whole.output.size());
+                    CHECK(std::fclose(file) == 0);
+                }
+            }
+            EXPECT_STATUS(dg_true_peak_destroy(analyzer), DG_OK);
+            ++cases;
+        }
+    }
+    std::printf("  conservative 4x bound: %d cases, full tails and chunk equality\n", cases);
+}
+
+void test_true_peak_link_reset_and_validation() {
+    auto config = base_config(48000, 2);
+    config.true_peak_detection = 1; config.lookahead_ms = 0;
+    std::vector<float> input(1024 * 2);
+    for (int i = 0; i < 1024; ++i) { input[2*i] = 4; input[2*i+1] = 0.001F; }
+    config.link_stereo = 0;
+    const auto independent = run_stream(config, input, 1);
+    config.link_stereo = 1;
+    const auto linked = run_stream(config, input, 33);
+    CHECK(independent.output[(independent.latency+500)*2+1] == 0.001F);
+    CHECK(linked.output[(linked.latency+500)*2+1] < 0.001F);
+    dg_limiter* handle = nullptr;
+    config.true_peak_detection = 2;
+    EXPECT_STATUS(dg_limiter_create(&config, &handle), DG_ERR_INVALID_ARGUMENT);
+    CHECK(handle == nullptr);
+    config.true_peak_detection = 1;
+    EXPECT_STATUS(dg_limiter_create(&config, &handle), DG_OK);
+    std::vector<float> output(input.size());
+    EXPECT_STATUS(dg_limiter_process(handle, view_of(input, 2), buffer_of(output, 2)), DG_OK);
+    EXPECT_STATUS(dg_limiter_reset(handle), DG_OK);
+    EXPECT_STATUS(dg_limiter_process(handle, view_of(input, 2), buffer_of(output, 2)), DG_OK);
+    CHECK(output == std::vector<float>(linked.output.begin(), linked.output.begin()+output.size()));
+    dg_limiter_values values{};
+    EXPECT_STATUS(dg_limiter_snapshot(handle, &values), DG_OK);
+    CHECK(values.frames == 1024);
+    EXPECT_STATUS(dg_limiter_destroy(handle), DG_OK);
+}
+
 void test_rate_and_channel_smoke() {
     const int32_t rates[] = {8000, 44100, 48000, 96000, 192000};
     for (int32_t rate : rates) {
@@ -846,7 +970,7 @@ void run(const char* name, void (*function)()) {
 }  // namespace
 
 int main() {
-    std::printf("dg_limiter tests (DG-014, sample peak only; no true-peak measurement)\n");
+    std::printf("dg_limiter tests (DG-014, sample and conservative 4x true-peak bounds)\n");
 
     run("create validation", test_create_validation);
     run("null handles and descriptor validation", test_null_and_descriptor_validation);
@@ -863,6 +987,9 @@ int main() {
     run("extremes", test_extremes);
     run("rate and channel smoke", test_rate_and_channel_smoke);
     run("true-peak gap evidence (measurement only)", test_true_peak_gap_evidence);
+    run("optional true-peak detector", test_optional_true_peak_detector);
+    run("true-peak safety matrix", test_true_peak_safety_matrix);
+    run("true-peak link, reset and validation", test_true_peak_link_reset_and_validation);
 
     std::printf("  %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

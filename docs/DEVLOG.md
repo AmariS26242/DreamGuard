@@ -10,6 +10,26 @@
 
 ---
 
+## 2026-11-12 — 第 36 轮 DG-014/015 阶段完成
+
+**任务与实现** 本轮由 Codex 直接编码。DG-014 增加可选的保守 4× true-peak guard，默认保留旧 sample-peak 模式。限制器使用插值窗口的绝对值上界，同时约束参与窗口的样本，避免增益变化破坏峰值限制。立体声可链接或独立，NaN/Inf 归零。新增模式至少需要 64 帧上下文。
+
+**播放接入** PCM16 桥在压缩后开启 −1 dBFS guard，JNI 增加 drain，Media3 在 EOS 和关闭处理前完整输出尾部；seek/reset 丢弃旧流状态。每段处理增加 64 帧启动静音，48 kHz 时 1.333 ms，8 kHz 时 8 ms。正常结束保留全部内容。极少数 native 失败仍逐字节回退，故障时最多可能丢弃未成功取出的 64 帧尾部。关闭处理后的当前输入保持逐字节直通。
+
+**发现并修正的失败** 短窗口版本在内部 4× 测量通过，但独立 FFmpeg 16× 对照为 101 PASS / 19 FAIL，极端噪声最大超标 1.798311 dB。已保留失败 CSV。修正采用 257-tap 重建窗口，并用合并的正权重同时覆盖短/长 4× 重建。最终独立对照为 **120 PASS / 0 FAIL**，固定容差 +0.05 dB；没有放宽容差。这是有限信号矩阵的对照，不是模拟波形或广播标准认证。
+
+**验证** NDK 27.0.12077973、API 35 x86_64 模拟器。九组全新原生可执行文件全部通过：limiter **3706/0**（含导出检查）、PCM16 **486/0**、analyzer **215/0**、compressor **348/0**、lifecycle **1328/0**、PCM **139/0**、meter **207/0**、LUFS **238/0**，纯 C 头兼容通过并实际调用新 drain。JVM **142 tests / 0 failures / 0 skipped**。Debug/Release 三 ABI 构建通过。新增回归涵盖末帧瞬态、短于延迟的文件、完整尾部、重复 drain、输出容量不足、分块一致、独立声道、reset、EOS、关闭/恢复处理和错误回退。
+
+**性能** DG-015 已扩展为 5 采样率 × 6 块长 × 2 声道布局 × 5 路径，共 **300 行**。每项预热 32 块、测量 200 次，记录 median/p95/max、进程 CPU 时间、xRT、算法延迟、RSS/HWM、C++ 分配调用计数。实测过程段 new/new[] 计数均为 0；该统计不覆盖 libc、JNI/JVM 或其他线程。工具、Android 复现脚本、独立参考脚本及 CSV、源码 SHA256 已归档。
+
+**应用短测** 正常 APK 在模拟器通过系统选择器打开 8 秒、44.1 kHz、单声道 PCM16 WAV。处理开启时 UI 为 ACTIVE，MediaSession PLAYING；结束为 STOPPED、position=8001 ms（输入 8000 ms，加 64 帧约 1.45 ms）。重播后关闭/恢复处理仍可播放，未见 AndroidRuntime 错误。尾部样本完整性由原生/JVM 断言验证，UI 状态不作为音频样本证明。
+
+**状态与边界** DG-014、DG-015 记 DONE，不标 VERIFIED。iQOO Z9T 当前未连接，真机听感、蓝牙、arm64 实测和长时间稳定性按用户安排后测。保守上界可能对高频或噪声多衰减；不承诺听感透明，不改变第三方应用音频能力边界。
+
+**证据与提交** [阶段报告与原始结果](evidence/dg014-015-2026-11-12/README.md)。代码和本记录同批提交到 main；精确源码指纹见 source-sha256.csv。
+
+---
+
 ## 2026-11-12 — 第 35 轮 DG-015 DSP 基准工具与模拟器结果
 
 **任务** DG-015。新增 `dsp-core/tools/bench/dg_bench.cpp` 和 CMake 接线。工具输出每块处理的 median、p95 和 xRT，当前覆盖 compressor、sample-peak limiter、4× true-peak analyzer，使用固定正弦输入和 25 次重复。
@@ -37,19 +57,19 @@ true_peak,96000,512,2,38.297,74.552,139.262
 
 **任务** DG-014 第一轮 true-peak analyzer。上一轮由 Flash 写入代码，本轮由 Codex 独立编译和运行。
 
-**构建环境** NDK 27.0.12077973，API 35 x86_64 模拟器 " + Q + "ime35" + Q + "。编译输出目录为 " + Q + "dsp-core/build/android-test" + Q + "。
+**构建环境** NDK 27.0.12077973，API 35 x86_64 模拟器 `ime35`。编译输出目录为 `dsp-core/build/android-test`。
 
 | 项目 | 结果 |
 | --- | --- |
-| " + Q + "dg_true_peak_tests" + Q + " | **215 checks / 0 failures** |
-| " + Q + "dg_limiter_tests" + Q + " | **2125 checks / 0 failures**，含新增 true-peak 缺口测量 |
-| " + Q + "dg_header_c_compat" + Q + " | **PASSED** |
-| " + Q + ":app:testDebugUnitTest :app:assembleDebug" + Q + " | **BUILD SUCCESSFUL** |
-| 缺口测量 | " + Q + "−2 dBFS" + Q + " sample ceiling 下，sample peak " + Q + "−2.000 dBFS" + Q + "，4× analyzer true peak " + Q + "+1.012 dBFS" + Q + "，过冲约 " + Q + "3.01 dB" + Q + " |
+| `dg_true_peak_tests` | **215 checks / 0 failures** |
+| `dg_limiter_tests` | **2125 checks / 0 failures**，含新增 true-peak 缺口测量 |
+| `dg_header_c_compat` | 当时误用了旧可执行文件；第 36 轮已完整重编译并运行通过 |
+| `:app:testDebugUnitTest :app:assembleDebug` | **BUILD SUCCESSFUL** |
+| 缺口测量 | `−2 dBFS` sample ceiling 下，sample peak `−2.000 dBFS`，4× analyzer true peak `+1.012 dBFS`，过冲约 `3.01 dB` |
 
-" + Q + "dg_true_peak_tests" + Q + " 的 fs/4、45° 正弦用例测得 sample peak " + Q + "0.707107" + Q + "、true peak " + Q + "1.000235" + Q + "，误差约 " + Q + "0.002 dB" + Q + "。测试还覆盖静音、DC、Nyquist、脉冲、NaN/Inf、单/双声道、单帧、奇数块、分块不变性、reset 和采样率范围。
+`dg_true_peak_tests` 的 fs/4、45° 正弦用例测得 sample peak `0.707107`、true peak `1.000235`，误差约 `0.002 dB`。测试还覆盖静音、DC、Nyquist、脉冲、NaN/Inf、单/双声道、单帧、奇数块、分块不变性、reset 和采样率范围。
 
-本轮只新增和验证测量器。limiter 算法没有改，" + Q + "pcm16_processor" + Q + "、JNI、Kotlin 和播放链路没有接入 limiter。DG-014 保持 " + Q + "IN_PROGRESS" + Q + "。当前证据证明 sample-peak limiter 的 true-peak 缺口，尚未证明 true-peak limiter、商用参考对照、真机、听感或 ASan/LSan。
+本轮只新增和验证测量器。limiter 算法没有改，`pcm16_processor`、JNI、Kotlin 和播放链路没有接入 limiter。DG-014 保持 `IN_PROGRESS`。当前证据证明 sample-peak limiter 的 true-peak 缺口，尚未证明 true-peak limiter、商用参考对照、真机、听感或 ASan/LSan。
 
 ---
 

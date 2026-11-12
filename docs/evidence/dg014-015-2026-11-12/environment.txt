@@ -1,0 +1,8 @@
+UTC=2026-11-12T14:36:24.1931377Z
+NDK=27.0.12077973
+ABI=x86_64 API=26 Release c++_static
+Serial=emulator-5554
+Android/sdk_phone64_x86_64/emu64x:15/AE3A.240806.019/12368160:userdebug/test-keys
+Linux localhost 6.6.30-android15-8-gdd9c02ccfe27-ab11987101 #1 SMP PREEMPT Tue Jun 18 20:50:32 UTC 2024 x86_64 Toybox
+source_commit=ca31ab3dd3ce46acd8edc030f3a6fe952d6bfa55
+source_dirty= app/src/main/cpp/jni_bridge.cpp                    |  17 ++  .../dreamguard/app/audio/LocalAudioProcessor.kt    |  52 +++-  .../com/dreamguard/app/audio/NativePcmProcessor.kt |  11 +-  .../java/com/dreamguard/app/audio/PcmCompressor.kt |   8 +-  .../java/com/dreamguard/app/ui/DreamGuardScreen.kt |   2 +-  .../app/audio/LocalAudioProcessorTest.kt           | 102 +++++++  .../app/audio/NativePcmProcessorContractTest.kt    |   1 +  dsp-core/include/dreamguard/limiter.h              | 108 +++-----  dsp-core/include/dreamguard/pcm16_processor.h      |  91 ++----  dsp-core/include/dreamguard/true_peak.h            |  10 +-  dsp-core/src/limiter.cpp                           | 126 +++++++--  dsp-core/src/pcm16_processor.cpp                   |  59 +++-  dsp-core/src/true_peak.cpp                         |  51 +---  dsp-core/tests/test_header_c_compat.c              |  19 +-  dsp-core/tests/test_limiter.cpp                    | 145 +++++++++-  dsp-core/tests/test_pcm16_processor.cpp            | 105 ++++---  dsp-core/tools/bench/dg_bench.cpp                  | 307 ++++++++++++++-------  17 files changed, 830 insertions(+), 384 deletions(-)

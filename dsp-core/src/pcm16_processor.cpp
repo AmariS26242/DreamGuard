@@ -15,6 +15,7 @@
 #include <new>
 
 #include "dreamguard/compressor.h"
+#include "dreamguard/limiter.h"
 
 namespace {
 
@@ -90,6 +91,8 @@ void write_values(dg_pcm16_processor_values* out_values, uint32_t frames,
 
 struct dg_pcm16_processor {
     dg_compressor* compressor = nullptr;
+    dg_limiter* limiter = nullptr;
+    bool pending_tail = false;
     int32_t sample_rate = 0;
     int32_t channel_count = 0;
     uint32_t frame_bytes = 0;
@@ -108,6 +111,9 @@ dg_status dg_pcm16_processor_create(const dg_pcm16_processor_config* config,
     }
     *out_processor = nullptr;
     if (config == nullptr) {
+        return DG_ERR_INVALID_ARGUMENT;
+    }
+    if (config->limiter_enabled != 0 && config->limiter_enabled != 1) {
         return DG_ERR_INVALID_ARGUMENT;
     }
     if (config->channel_count < DG_PCM_CHANNELS_MIN ||
@@ -143,6 +149,21 @@ dg_status dg_pcm16_processor_create(const dg_pcm16_processor_config* config,
     processor->channel_count = config->channel_count;
     processor->frame_bytes =
         static_cast<uint32_t>(config->channel_count) * DG_PCM16_BYTES_PER_SAMPLE;
+    if (config->limiter_enabled != 0) {
+        dg_limiter_config safety{};
+        safety.sample_rate = config->sample_rate;
+        safety.channel_count = config->channel_count;
+        safety.ceiling_dbfs = -1.0;
+        safety.lookahead_ms = 0.0;
+        safety.release_ms = 100.0;
+        safety.link_stereo = 1;
+        safety.true_peak_detection = 1;
+        const auto limiter_status = dg_limiter_create(&safety, &processor->limiter);
+        if (limiter_status != DG_OK) {
+            dg_pcm16_processor_destroy(processor);
+            return limiter_status;
+        }
+    }
     *out_processor = processor;
     return DG_OK;
 }
@@ -152,6 +173,7 @@ dg_status dg_pcm16_processor_destroy(dg_pcm16_processor* processor) {
         return DG_ERR_NULL_HANDLE;
     }
     (void)dg_compressor_destroy(processor->compressor);
+    if (processor->limiter != nullptr) (void)dg_limiter_destroy(processor->limiter);
     processor->compressor = nullptr;
     delete processor;
     return DG_OK;
@@ -161,6 +183,8 @@ dg_status dg_pcm16_processor_reset(dg_pcm16_processor* processor) {
     if (processor == nullptr) {
         return DG_ERR_NULL_HANDLE;
     }
+    processor->pending_tail = false;
+    if (processor->limiter != nullptr) (void)dg_limiter_reset(processor->limiter);
     return dg_compressor_reset(processor->compressor);
 }
 
@@ -184,6 +208,10 @@ dg_status dg_pcm16_processor_process(dg_pcm16_processor* processor,
     if (output_capacity < input_bytes) {
         return DG_ERR_INVALID_ARGUMENT;
     }
+    // Delayed PCM must stay frame-aligned. The legacy compressor-only path
+    // continues to preserve partial frames verbatim.
+    if (bypass == 0 && processor->limiter != nullptr &&
+        input_bytes % processor->frame_bytes != 0) return DG_ERR_INVALID_ARGUMENT;
 
     const auto input_address = reinterpret_cast<std::uintptr_t>(input);
     const auto output_address = reinterpret_cast<std::uintptr_t>(output);
@@ -234,6 +262,11 @@ dg_status dg_pcm16_processor_process(dg_pcm16_processor* processor,
         if (status != DG_OK) {
             return status;
         }
+        if (processor->limiter != nullptr) {
+            const auto limiter_status = dg_limiter_process(processor->limiter, input_view, output_view);
+            if (limiter_status != DG_OK) return limiter_status;
+            processor->pending_tail = true;
+        }
 
         for (std::size_t sample = 0; sample < samples; ++sample) {
             store_sample(destination + byte_offset +
@@ -255,8 +288,30 @@ dg_status dg_pcm16_processor_process(dg_pcm16_processor* processor,
     return DG_OK;
 }
 
-uint32_t dg_pcm16_processor_latency_frames(void) {
-    return 0;
+uint32_t dg_pcm16_processor_latency_frames(const dg_pcm16_processor* processor) {
+    return processor == nullptr ? 0 : dg_limiter_latency_frames(processor->limiter);
+}
+
+dg_status dg_pcm16_processor_drain(dg_pcm16_processor* processor, void* output,
+                                   uint32_t output_capacity, uint32_t* out_bytes) {
+    if (out_bytes == nullptr) return DG_ERR_INVALID_ARGUMENT;
+    *out_bytes = 0;
+    if (processor == nullptr) return DG_ERR_NULL_HANDLE;
+    if (!processor->pending_tail) return DG_OK;
+    const auto latency = dg_pcm16_processor_latency_frames(processor);
+    const auto bytes = latency * processor->frame_bytes;
+    if (output == nullptr || output_capacity < bytes) return DG_ERR_INVALID_ARGUMENT;
+    uint32_t frames = 0;
+    const auto status = dg_limiter_flush(processor->limiter,
+        {processor->scratch, latency, processor->channel_count}, &frames);
+    if (status != DG_OK) return status;
+    auto* destination = static_cast<uint8_t*>(output);
+    for (uint32_t i = 0; i < frames * processor->channel_count; ++i) {
+        store_sample(destination + i * 2, quantize(processor->scratch[i]));
+    }
+    processor->pending_tail = false;
+    *out_bytes = bytes;
+    return DG_OK;
 }
 
 }  // extern "C"

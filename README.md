@@ -6,6 +6,8 @@ DreamGuard 是一个 Android-first 的睡眠声景应用骨架：Jetpack Compose
 
 > 当前版本是 **工程骨架 / 可运行原型**，不是已经过真机长时间睡眠验证的产品。未验证项见[验证状态](#验证状态)。
 
+> 2026-11-12：本地 PCM16 已接入压缩后的保守 4× 峰值保护，正常结束和切换直通会完整输出尾部。DG-014/015 开发阶段完成，独立参考 120/0、JVM 142/0、300 项性能矩阵已归档。真机听感与长测后补。[阶段报告](docs/evidence/dg014-015-2026-11-12/README.md)
+
 ## 功能
 
 - Compose + Material 3 深色睡眠界面，单屏操作。
@@ -44,7 +46,7 @@ DreamGuard/
 │       │   ├── AndroidManifest.xml
 │       │   ├── cpp/
 │       │   │   ├── CMakeLists.txt          # 目标/库名 dreamguard_dsp，add_subdirectory(dsp-core)
-│       │   │   ├── jni_bridge.cpp          # 9 个声景 + 5 个 PCM16 JNI 符号，只调用 C API
+│       │   │   ├── jni_bridge.cpp          # 9 个声景 + 6 个 PCM16 JNI 符号，只调用 C API
 │       │   ├── java/com/dreamguard/app/
 │       │   │   ├── MainActivity.kt
 │       │   │   ├── audio/

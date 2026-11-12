@@ -606,7 +606,7 @@ private fun LocalAudioCard(
                         fontSize = 13.sp,
                     )
                     Text(
-                        text = "开启时 PCM16 经 native 压缩器（−6 dB 补偿）；关闭时逐字节旁路",
+                        text = "开启时压缩动态范围并限制峰值（−6 dB 补偿）；关闭时原声直通",
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
                         fontSize = 11.sp,
                     )

@@ -1,0 +1,20 @@
+dg_lifecycle_tests: portable DSP core (DG-010)
+  create rejects null arguments
+  create rejects out-of-range sample rate
+  create rejects out-of-range channel count
+  create validates sample rate first
+  create accepts every supported configuration
+  live handles are distinct
+  null handles report DG_ERR_NULL_HANDLE
+  destroy accepts a valid handle once
+  render validates arguments
+  render writes interleaved in-range samples
+  reset restores the initial render state
+  reset preserves parameters
+  parameter setters keep clamping
+  setters may race with render
+  separate engines share no state
+  repeated lifecycle is deterministic
+  version is reported
+1328 checks, 0 failure(s)
+PASSED

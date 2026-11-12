@@ -38,6 +38,9 @@ internal interface PcmCompressor {
 
     fun reset(handle: Long)
 
+    /** Emits retained PCM at EOS/before bypass. At most 256 bytes (64 stereo frames). */
+    fun drain(handle: Long, output: ByteBuffer, outputOffset: Int): Int = 0
+
     fun destroy(handle: Long)
 }
 
@@ -69,8 +72,11 @@ internal object JniPcmCompressor : PcmCompressor {
     )
 
     override fun reset(handle: Long) {
-        NativePcmProcessor.reset(handle)
+        check(NativePcmProcessor.reset(handle) == 0) { "native reset failed" }
     }
+
+    override fun drain(handle: Long, output: ByteBuffer, outputOffset: Int): Int =
+        NativePcmProcessor.drain(handle, output, outputOffset)
 
     override fun destroy(handle: Long) {
         NativePcmProcessor.destroy(handle)

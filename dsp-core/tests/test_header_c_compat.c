@@ -244,7 +244,7 @@ int main(void) {
 
     /* DG-014 limiter header: create, limit, snapshot, flush and destroy from C. */
     {
-        dg_limiter_config limiter_config;
+        dg_limiter_config limiter_config = {0};
         dg_limiter* limiter = NULL;
         dg_limiter_values limiter_values;
         float limiter_samples[512];
@@ -370,7 +370,7 @@ int main(void) {
 
     /* DG-022 PCM16 bridge: create, bit-exact bypass, destroy from plain C. */
     {
-        dg_pcm16_processor_config bridge_config;
+        dg_pcm16_processor_config bridge_config = {0};
         dg_pcm16_processor* bridge = NULL;
         uint8_t bridge_input[8] = {0x01, 0x00, 0x02, 0x00,
                                    0x03, 0x00, 0x04, 0x00};
@@ -406,7 +406,7 @@ int main(void) {
             printf("dg_header_c_compat: unexpected PCM16 bridge values\n");
             return 1;
         }
-        if (dg_pcm16_processor_latency_frames() != 0) {
+        if (dg_pcm16_processor_latency_frames(NULL) != 0) {
             printf("dg_header_c_compat: unexpected PCM16 bridge latency\n");
             return 1;
         }
@@ -414,6 +414,19 @@ int main(void) {
             printf("dg_header_c_compat: dg_pcm16_processor_destroy failed\n");
             return 1;
         }
+        bridge_config.limiter_enabled = 1;
+        if (dg_pcm16_processor_create(&bridge_config, &bridge) != DG_OK) return 1;
+        if (dg_pcm16_processor_latency_frames(bridge) != 64) return 1;
+        if (dg_pcm16_processor_process(bridge, bridge_input, sizeof(bridge_input),
+                bridge_output, sizeof(bridge_output), 0, &bridge_values) != DG_OK) return 1;
+        {
+            uint8_t tail[128];
+            uint32_t bytes = 0;
+            if (dg_pcm16_processor_drain(bridge, tail, sizeof(tail), &bytes) != DG_OK ||
+                bytes != sizeof(tail) || memcmp(tail + sizeof(tail) - sizeof(bridge_input),
+                    bridge_input, sizeof(bridge_input)) != 0) return 1;
+        }
+        if (dg_pcm16_processor_destroy(bridge) != DG_OK) return 1;
     }
 
     printf("dg_header_c_compat: PASSED\n");
