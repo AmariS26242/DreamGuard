@@ -1,6 +1,8 @@
 /* DreamGuard DSP core - sample-peak lookahead limiter (DG-014).
  *
- * STATUS: UNVERIFIED. Written but never compiled or run in this workspace.
+ * STATUS: SAMPLE-PEAK TESTED. The sample-peak suite, including the DG-014
+ * measurement-only true-peak gap case, passed 2125/0 on an API 35 x86_64
+ * emulator. This header still does not describe a true-peak limiter.
  *
  * This is the DG-014 minimum safety limiter. It is deliberately a SAMPLE-PEAK
  * limiter with a finite lookahead: it can guarantee that every output SAMPLE

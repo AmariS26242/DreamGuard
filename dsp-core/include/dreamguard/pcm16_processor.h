@@ -1,8 +1,8 @@
 /* DreamGuard DSP core - PCM16 <-> compressor bridge (DG-022).
  *
- * STATUS: UNVERIFIED. This file was written for DG-022 but the change that
- * introduced it could not be compiled or run in its authoring environment, so
- * it has no execution evidence yet. The DG-013 compressor it wraps does have
+ * STATUS: DEVICE-LINK UNVERIFIED. The bridge and its C++ suite passed 206/0
+ * on an API 35 x86_64 emulator. The wrapped compressor has separate 348/0
+ * signal-level evidence, while physical-device playback remains unverified.
  * host test evidence; see docs/STATUS.md.
  *
  * Why this exists

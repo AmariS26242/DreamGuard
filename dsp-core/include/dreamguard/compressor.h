@@ -1,6 +1,8 @@
 /* DreamGuard DSP core - feed-forward dynamic range compressor (DG-013).
  *
- * STATUS: UNVERIFIED. Written but never compiled or run in this workspace.
+ * STATUS: SIGNAL-LEVEL TESTED. The compressor suite passed 348/0 on an
+ * API 35 x86_64 emulator. This does not cover listening or physical-device
+ * behavior.
  *
  * This is the DG-013 minimum compressor: threshold, ratio, soft knee, attack,
  * release, optional stereo linking and a smoothed gain. It is deliberately a
