@@ -17,6 +17,7 @@
 #include "dreamguard/meter.h"
 #include "dreamguard/pcm.h"
 #include "dreamguard/pcm16_processor.h"
+#include "dreamguard/true_peak.h"
 
 int main(void) {
     dg_config config;
@@ -312,6 +313,57 @@ int main(void) {
         }
         if (dg_limiter_destroy(limiter) != DG_OK) {
             printf("dg_header_c_compat: dg_limiter_destroy failed\n");
+            return 1;
+        }
+    }
+
+    /* DG-014 true-peak analyser header: create, process, snapshot, destroy. */
+    {
+        dg_true_peak_config true_peak_config;
+        dg_true_peak* true_peak = NULL;
+        dg_true_peak_values true_peak_values;
+        float true_peak_samples[64];
+        dg_pcm_view true_peak_view;
+        int i;
+
+        true_peak_config.sample_rate = 48000;
+        true_peak_config.channel_count = 1;
+        for (i = 0; i < 64; ++i) {
+            true_peak_samples[i] = (i % 2 == 0) ? 0.5f : -0.5f;
+        }
+        memset(&true_peak_values, 0, sizeof(true_peak_values));
+        if (dg_true_peak_create(&true_peak_config, &true_peak) != DG_OK ||
+            true_peak == NULL) {
+            printf("dg_header_c_compat: dg_true_peak_create failed\n");
+            return 1;
+        }
+        true_peak_view.samples = true_peak_samples;
+        true_peak_view.frame_count = 64;
+        true_peak_view.channel_count = 1;
+        if (dg_true_peak_process(true_peak, true_peak_view) != DG_OK) {
+            printf("dg_header_c_compat: dg_true_peak_process failed\n");
+            return 1;
+        }
+        if (dg_true_peak_snapshot(true_peak, &true_peak_values) != DG_OK) {
+            printf("dg_header_c_compat: dg_true_peak_snapshot failed\n");
+            return 1;
+        }
+        if (true_peak_values.frames != 64 ||
+            true_peak_values.channel_count != 1 ||
+            true_peak_values.oversampling_factor != 4 ||
+            true_peak_values.filter_taps != 65 ||
+            !(true_peak_values.total_sample_peak_linear >= 0.5 - 1e-9) ||
+            !(true_peak_values.total_true_peak_linear >=
+              true_peak_values.total_sample_peak_linear - 1e-9)) {
+            printf("dg_header_c_compat: unexpected true-peak values\n");
+            return 1;
+        }
+        if (fabs(dg_true_peak_linear_to_dbfs(1.0)) > 1e-9) {
+            printf("dg_header_c_compat: dg_true_peak_linear_to_dbfs failed\n");
+            return 1;
+        }
+        if (dg_true_peak_destroy(true_peak) != DG_OK) {
+            printf("dg_header_c_compat: dg_true_peak_destroy failed\n");
             return 1;
         }
     }

@@ -1,8 +1,10 @@
 /* Host tests for the DG-014 sample-peak lookahead limiter.
  *
- * These tests deliberately check a SAMPLE bound. They do not measure true peak:
- * there is no oversampling here, so a passing run must never be reported as
- * true-peak acceptance.
+ * The limiter tests deliberately check a SAMPLE bound. One additional test at
+ * the end feeds the limiter output to the DG-014 4x true-peak analyser to show
+ * that the current limiter can still overshoot the inter-sample peak. That test
+ * measures the gap only: it does not change the limiter algorithm, and a passing
+ * run must never be reported as true-peak acceptance.
  */
 
 #include <cmath>
@@ -13,8 +15,11 @@
 #include <vector>
 
 #include "dreamguard/limiter.h"
+#include "dreamguard/true_peak.h"
 
 namespace {
+
+constexpr double kPi = 3.14159265358979323846;
 
 int g_checks = 0;
 int g_failures = 0;
@@ -749,6 +754,70 @@ void test_extremes() {
     }
 }
 
+void test_true_peak_gap_evidence() {
+    /* The sample-peak limiter only constrains x[n]. A sine at fs/4 with a
+     * 45-degree phase has every sample at A/sqrt(2) but its reconstructed peak
+     * at A. With A = 1.2 and a -2 dBFS ceiling the limiter reduces the samples
+     * to the ceiling (about 0.794) but the reconstructed waveform still peaks
+     * near 1.123, i.e. above 0 dBFS. This is the DG-014 gap, measured with the
+     * new analyser; the limiter itself is unchanged. */
+    dg_limiter_config config = base_config(48000, 1);
+    config.ceiling_dbfs = -2.0;
+    config.lookahead_ms = 2.0;
+    config.release_ms = 50.0;
+
+    const std::size_t frames = 9600;
+    const std::size_t fade = 480;
+    std::vector<float> input(frames, 0.0F);
+    for (std::size_t n = 0; n < frames; ++n) {
+        double envelope = 1.0;
+        if (n < fade) {
+            /* Smooth fade-in so the measurement is not dominated by a step. */
+            envelope = 0.5 - 0.5 * std::cos(kPi * static_cast<double>(n) /
+                                            static_cast<double>(fade));
+        }
+        input[n] = static_cast<float>(
+            1.2 * envelope * std::sin(kPi * static_cast<double>(n) / 2.0 + kPi / 4.0));
+    }
+
+    const RunResult result = run_stream(config, input);
+    CHECK(result.created && result.processed && result.flushed);
+    if (!result.processed) {
+        return;
+    }
+    const double ceiling = dbfs_to_linear(config.ceiling_dbfs);
+    CHECK(result.values.over_ceiling_samples == 0);
+    CHECK(result.values.limited_samples > 0);
+    CHECK(max_abs(result.output) <= ceiling + 1e-6);
+
+    dg_true_peak_config analyzer_config{};
+    analyzer_config.sample_rate = 48000;
+    analyzer_config.channel_count = 1;
+    dg_true_peak* analyzer = nullptr;
+    EXPECT_STATUS(dg_true_peak_create(&analyzer_config, &analyzer), DG_OK);
+    if (analyzer == nullptr) {
+        CHECK(false);
+        return;
+    }
+    EXPECT_STATUS(dg_true_peak_process(analyzer, view_of(result.output, 1)), DG_OK);
+    dg_true_peak_values measured{};
+    EXPECT_STATUS(dg_true_peak_snapshot(analyzer, &measured), DG_OK);
+    EXPECT_STATUS(dg_true_peak_destroy(analyzer), DG_OK);
+
+    /* The sample-peak bound still holds, yet the inter-sample peak is far above
+     * the ceiling and even above digital full scale. */
+    CHECK(measured.total_sample_peak_linear <= ceiling + 1e-6);
+    CHECK(measured.total_sample_peak_linear >= ceiling - 1e-4);
+    CHECK(measured.total_true_peak_linear > ceiling * 1.25);
+    CHECK(measured.total_true_peak_dbfs > 0.0);
+    std::printf(
+        "  true-peak gap: ceiling %.3f dBFS, output sample peak %.3f dBFS, "
+        "true peak %.3f dBFS, overshoot %.2f dB\n",
+        config.ceiling_dbfs, measured.total_sample_peak_dbfs,
+        measured.total_true_peak_dbfs,
+        measured.total_true_peak_dbfs - config.ceiling_dbfs);
+}
+
 void test_rate_and_channel_smoke() {
     const int32_t rates[] = {8000, 44100, 48000, 96000, 192000};
     for (int32_t rate : rates) {
@@ -793,6 +862,7 @@ int main() {
     run("non-finite input", test_non_finite_input);
     run("extremes", test_extremes);
     run("rate and channel smoke", test_rate_and_channel_smoke);
+    run("true-peak gap evidence (measurement only)", test_true_peak_gap_evidence);
 
     std::printf("  %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

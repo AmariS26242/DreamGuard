@@ -3,9 +3,9 @@
 C++20 soundscape generator with its **DG-010 lifecycle C API**, the
 **stateless Float32 PCM helpers** from DG-011, the **streaming meter plus a
 PROVISIONAL BS.1770-4-style loudness analyser** from DG-012, the **DG-013
-feed-forward compressor**, the **DG-014 sample-peak lookahead limiter**, and the
-**DG-022 PCM16 bridge** that lets Android local playback reach the compressor over
-JNI. No Android, no JNI, no platform headers: the same sources build for the host
+feed-forward compressor**, the **DG-014 sample-peak lookahead limiter**, the
+**DG-014 4x true-peak analyser**, and the **DG-022 PCM16 bridge** that lets
+Android local playback reach the compressor over JNI. No Android, no JNI, no platform headers: the same sources build for the host
 (tests) and for Android (as a subdirectory of `app/src/main/cpp/CMakeLists.txt`).
 
 > **DG-012 is `IN_PROGRESS`, not verified.** The meter and LUFS sources are now
@@ -49,16 +49,33 @@ JNI. No Android, no JNI, no platform headers: the same sources build for the hos
 > PCM16 bridge, no device playback has exercised it — do not describe it as a
 > finished or audibly verified compressor.
 >
-> **DG-014 is `IN_PROGRESS`; its sample-peak tests have run, true peak has not.**
-> `limiter.h`, `limiter.cpp`, `tests/test_limiter.cpp` and the CMake/CTest wiring
-> were written in round 17. The caller then ran the suite on an NDK x86_64 API 35
-> emulator: **2113 checks / 0 failures**, and
-> `testDebugUnitTest assembleDebug assembleRelease` succeeded for all three ABIs
-> with the JVM tests `up-to-date`. That is evidence for the sample-peak path only.
-> The component bounds **sample peak only**: it has no oversampling and no
-> reconstruction, so it does not detect or bound inter-sample/true peak. A
-> true-peak acceptance claim needs an oversampled measurement that has not been
-> performed. It is not wired into playback.
+> **DG-014 is `IN_PROGRESS`; the sample-peak limiter and the measurement-only true-peak analyzer have run.**
+> The analyzer and the updated limiter suite ran on an NDK x86_64 API 35 emulator with **215/0** and
+> **2125/0** checks. `dg_header_c_compat` passed, and the Gradle Debug build succeeded. The limiter
+> algorithm is unchanged and still bounds **sample peak only**.
+> The limiter itself is unchanged and still bounds **sample peak only**: it has
+> no oversampling and no reconstruction, so it does not detect or bound
+> inter-sample/true peak.
+>
+> This round (DG-014 true-peak analyzer, first round) adds
+> `include/dreamguard/true_peak.h`, `src/true_peak.cpp`,
+> `tests/test_true_peak.cpp`, a plain-C block in `tests/test_header_c_compat.c`
+> and a limiter gap case. The analyser reconstructs the waveform at **4x** with a
+> 65-tap polyphase windowed-sinc filter and reports sample and true peak for 1–2
+> channels, arbitrary chunking, reset and snapshot; its processing path allocates
+> nothing. It is **measurement only**: it is not a limiter, it is not wired into
+> playback, and it does not make DG-014's true-peak acceptance pass. The new gap
+> case is written to measure whether the current sample-peak limiter overshoots;
+> the expected value is a true peak around +1.0 dBFS from a −2 dBFS ceiling.
+> The measurements prove the analyzer and the current limiter's true-peak gap on the emulator. They do not prove a true-peak limiter,
+> playback-chain limiter integration, commercial-reference agreement, physical-device behavior or listening quality.
+>
+> **Evidence note.** `dg_limiter` (2113/0), `dg_compressor` (348/0) and
+> `dg_pcm16_processor` (206/0) have run on the NDK x86_64 API 35 emulator.
+> `limiter.h`, `compressor.h` and `pcm16_processor.h` still carry a
+> `STATUS: UNVERIFIED` line in their file headers; those three files are outside
+> this round's write scope, so this round records the contradiction instead of
+> editing them. See `docs/STATUS.md` for the pending correction.
 
 ## Layout
 
@@ -70,18 +87,21 @@ dsp-core/
 ├── include/dreamguard/lufs.h       public C99 API for LUFS (DG-012, PROVISIONAL)
 ├── include/dreamguard/compressor.h public C99 API for the compressor (DG-013)
 ├── include/dreamguard/limiter.h    public C99 API for the limiter (DG-014, sample peak)
+├── include/dreamguard/true_peak.h  public C99 API for the 4x true-peak analyser (DG-014)
 ├── include/dreamguard/pcm16_processor.h public C99 PCM16 <-> compressor bridge (DG-022)
 ├── src/dg_engine.cpp               lifecycle implementation (no global state)
 ├── src/compressor.cpp              threshold / ratio / soft knee / attack / release
 ├── src/pcm16_processor.cpp         PCM16 <-> float conversion, chunking, bit-exact bypass
 ├── src/limiter.cpp                 lookahead delay + sliding-minimum sample-peak limiter
+├── src/true_peak.cpp               65-tap polyphase 4x reconstruction + peak tracking
 ├── src/lufs.cpp                    K-weighting, gating, momentary/short/integrated
 ├── src/meter.cpp                   streaming RMS / sample peak / rolling window
 ├── src/pcm.cpp                     stateless bypass / gain / channel mapping
 ├── src/soundscape.{h,cpp}          the generator moved from app/src/main/cpp
 ├── tests/test_dg_lifecycle.cpp     lifecycle / validation / concurrency tests
 ├── tests/test_compressor.cpp       curve / ballistics / linking / click-free tests
-├── tests/test_limiter.cpp          delay / sample-peak bound / flush / linking tests
+├── tests/test_limiter.cpp          delay / sample-peak bound / flush / linking tests + true-peak gap
+├── tests/test_true_peak.cpp        4x analytic / chunking / reset / non-finite tests (DG-014)
 ├── tests/test_lufs.cpp             K-weighting / windows / gating / chunking tests
 ├── tests/test_meter.cpp            window / peak / clip / chunking tests
 ├── tests/test_pcm.cpp              PCM bit-exactness / mapping / validation tests
@@ -135,7 +155,17 @@ dsp-core/
   finite samples it processes. It has **no oversampling and no reconstruction**,
   so it cannot bound the true (inter-sample) peak. `process`/`flush`/`snapshot`
   do not allocate; it is not wired into playback. Its sample-peak suite ran on
-  x86_64 only (**2113 checks / 0 failures**); true peak has not been measured.
+  x86_64 only (**2125 checks / 0 failures** after the added measurement case); true peak is measured by the analyser below, not by the
+  limiter.
+- `dreamguard/true_peak.h` is a **measurement-only** 4x oversampled true-peak
+  analyser. It reconstructs the waveform with a 65-tap polyphase windowed-sinc
+  filter, reports sample peak, true peak, totals and counters for 1–2 channels,
+  and supports arbitrary chunking plus reset/snapshot. It does **not** limit,
+  does not modify samples, is not a standard-compliance meter and is **not**
+  wired into playback. Its processing path allocates nothing. The filter is
+  causal, so a stream that ends immediately after a transient can report a true
+  peak lower than the steady-state reconstruction; there is no flush call this
+  round. It passed **215/0** checks on the API 35 x86_64 emulator.
 
 ## API summary
 
@@ -154,8 +184,10 @@ dsp-core/
 | `dg_lufs_k_weighting_for_rate(rate, out)` | the K-weighting biquad coefficients the analyser uses |
 | `dg_compressor_create/destroy/reset`, `dg_compressor_process`, `dg_compressor_snapshot` | feed-forward compressor (DG-013, 348/0 on x86_64 emulator) |
 | `dg_compressor_static_gain_db(config, level_db, out)` | pure query for the static knee/ratio curve, in dB of gain reduction |
-| `dg_limiter_create/destroy/reset`, `dg_limiter_process`, `dg_limiter_flush`, `dg_limiter_snapshot` | sample-peak lookahead limiter (DG-014, 2113/0 on x86_64 emulator; true peak not measured) |
+| `dg_limiter_create/destroy/reset`, `dg_limiter_process`, `dg_limiter_flush`, `dg_limiter_snapshot` | sample-peak lookahead limiter (DG-014, 2125/0 on x86_64 emulator after the measurement-only gap case; true peak is measured separately by `dg_true_peak`) |
 | `dg_limiter_latency_frames(limiter)` | delay introduced by the lookahead, in frames (0 for NULL) |
+| `dg_true_peak_create/destroy/reset`, `dg_true_peak_process`, `dg_true_peak_snapshot` | 4x oversampled true-peak measurement (DG-014 analyser; measurement only, **215/0** on x86_64 API 35 emulator) |
+| `dg_true_peak_linear_to_dbfs(double)` | peak level helper with the −240 dBFS silence floor |
 | `dg_pcm16_processor_create/destroy/reset`, `dg_pcm16_processor_process`, `dg_pcm16_processor_latency_frames` | PCM16 <-> float <-> DG-013 compressor bridge used by Android local playback (DG-022; 27 groups, **206/0** on x86_64 emulator; **not** device-playback verified) |
 
 ### PCM buffer aliasing (DG-011)
@@ -453,6 +485,10 @@ on an Android API 35 emulator because the host has no native C++ compiler):
   (round 13, NDK, API 35 emulator; the round-12 334/2 run had two wrong test expectations, rewritten
   against analytic values). **Re-run in round 23 after the output descriptor type changed to
   `dg_pcm_buffer`: 348 / 0 again.** Signal-level acceptance only — no listening test.
+- `dg_limiter` — `tests/test_limiter.cpp` — 15 groups after this round — **2125 checks / 0 failures** on x86_64 API 35 emulator. The existing sample-peak assertions are unchanged. The new case measures a true-peak gap and does not alter the limiter.
+- `dg_true_peak` — `tests/test_true_peak.cpp` — 11 groups — **215 checks / 0 failures** on x86_64 API 35 emulator. It covers the analytic fs/4 45° gap (sample A/√2, true A, 3.01 dB), silence, DC,
+  Nyquist, impulse, NaN/Inf, 1/2 channels, one-frame and odd chunks, chunking invariance, reset,
+  rate/channel smoke and the dBFS helper.
 - `dg_pcm16_processor` — `tests/test_pcm16_processor.cpp` — **27 groups** — **206 checks / 0 failures** on
   x86_64 (NDK, API 35 emulator, round 23). It covers byte-exact bypass including a partial frame, bypass
   leaving the compressor envelope untouched, every int16 value at unity, -6.02 dB makeup, saturation, the
@@ -496,7 +532,13 @@ closed form (hard knee, the quadratic soft knee, continuity at the knee edges,
 ratio 1), steady-state gain reduction on a constant-magnitude signal, the
 attack/release one-pole law at whole time constants, channel linking versus
 independence, reset, chunking invariance, the per-sample gain-step bound that
-rules out clicks, and the clip/non-finite counters.
+rules out clicks, and the clip/non-finite counters. For the true-peak analyser
+(once it is run): the 4x/65-tap configuration, the analytic fs/4 45° gap, the
+exact inclusion of sample positions, silence/DC/Nyquist/impulse boundaries,
+NaN/Inf replacement and counters, 1–2 channel independence, one-frame and odd
+chunk processing, bit-identical totals across chunk sizes, reset, and a
+rate/channel smoke matrix. The limiter gap case measures the current
+sample-peak limiter's inter-sample overshoot; it does not change the algorithm.
 
 They do **not** use or test undefined behaviour: no double destroy, no stale or
 foreign handles, no destroy racing a render. They are also **not** a leak
@@ -508,4 +550,9 @@ green run would prove internal consistency and the published calibration point,
 particular streaming platform's normalisation. For DG-013 specifically: a green
 run would prove the curve, the ballistics law and click-freedom **as defined
 here**, not that the compressor sounds good, matches a commercial unit, or handles
-true peaks above 0 dBFS (it does not; that is DG-014).
+true peaks above 0 dBFS (it does not; that is DG-014). For the DG-014 analyser,
+a green run would prove that this 4x reconstruction reports the analytic fs/4
+gap and survives the listed edge cases; it would **not** prove agreement with a
+reference true-peak meter, compliance with BS.1770-4/EBU R128, or that a
+true-peak limiter exists. The limiter gap case is evidence of the remaining
+defect, not a fix.

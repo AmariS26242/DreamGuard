@@ -5,8 +5,8 @@ project(dreamguard_dsp_core LANGUAGES CXX)
 # Portable DSP core: the soundscape generator plus the C lifecycle API from
 # DG-010, the stateless Float32 PCM helpers from DG-011, the streaming meter and
 # provisional LUFS analysers from DG-012, the DG-013 feed-forward compressor, the
-# DG-014 sample-peak lookahead limiter and the DG-022 PCM16 bridge that lets
-# Android playback reach the compressor through JNI.
+# DG-014 sample-peak lookahead limiter, the DG-014 4x true-peak analyser and the
+# DG-022 PCM16 bridge that lets Android playback reach the compressor through JNI.
 # It has no Android or platform dependency, so the same sources build for the
 # host (tests, desktop tools) and for Android through
 # app/src/main/cpp/CMakeLists.txt.
@@ -18,7 +18,8 @@ add_library(dreamguard_dsp_core STATIC
         src/meter.cpp
         src/pcm.cpp
         src/pcm16_processor.cpp
-        src/soundscape.cpp)
+        src/soundscape.cpp
+        src/true_peak.cpp)
 
 target_include_directories(dreamguard_dsp_core
         PUBLIC include

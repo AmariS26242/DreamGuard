@@ -3,6 +3,76 @@
 按 `docs/ROADMAP.md` §12 的字段记录：日期、Commit、修改模块、完成任务编号、测试设备、测试结果、
 未解决问题及下一步任务。状态判定与证据见 `docs/STATUS.md`。
 
+> **证据口径说明（2026-11-11）**：`dg_limiter` **2113/0**、`dg_compressor` **348/0**、
+> `dg_pcm16_processor` **206/0** 均已由主代理在 NDK x86_64 API 35 模拟器实际运行。
+> `limiter.h`、`compressor.h`、`pcm16_processor.h` 的文件头仍写 `STATUS: UNVERIFIED`，与本日志冲突；
+> 这三处源文件不在本轮 writeScope 内，本轮未改，登记待修。
+
+---
+
+## 2026-11-12 — 第 34 轮 DG-014 analyzer 独立构建与模拟器测试
+
+**任务** DG-014 第一轮 true-peak analyzer。上一轮由 Flash 写入代码，本轮由 Codex 独立编译和运行。
+
+**构建环境** NDK 27.0.12077973，API 35 x86_64 模拟器 " + Q + "ime35" + Q + "。编译输出目录为 " + Q + "dsp-core/build/android-test" + Q + "。
+
+| 项目 | 结果 |
+| --- | --- |
+| " + Q + "dg_true_peak_tests" + Q + " | **215 checks / 0 failures** |
+| " + Q + "dg_limiter_tests" + Q + " | **2125 checks / 0 failures**，含新增 true-peak 缺口测量 |
+| " + Q + "dg_header_c_compat" + Q + " | **PASSED** |
+| " + Q + ":app:testDebugUnitTest :app:assembleDebug" + Q + " | **BUILD SUCCESSFUL** |
+| 缺口测量 | " + Q + "−2 dBFS" + Q + " sample ceiling 下，sample peak " + Q + "−2.000 dBFS" + Q + "，4× analyzer true peak " + Q + "+1.012 dBFS" + Q + "，过冲约 " + Q + "3.01 dB" + Q + " |
+
+" + Q + "dg_true_peak_tests" + Q + " 的 fs/4、45° 正弦用例测得 sample peak " + Q + "0.707107" + Q + "、true peak " + Q + "1.000235" + Q + "，误差约 " + Q + "0.002 dB" + Q + "。测试还覆盖静音、DC、Nyquist、脉冲、NaN/Inf、单/双声道、单帧、奇数块、分块不变性、reset 和采样率范围。
+
+本轮只新增和验证测量器。limiter 算法没有改，" + Q + "pcm16_processor" + Q + "、JNI、Kotlin 和播放链路没有接入 limiter。DG-014 保持 " + Q + "IN_PROGRESS" + Q + "。当前证据证明 sample-peak limiter 的 true-peak 缺口，尚未证明 true-peak limiter、商用参考对照、真机、听感或 ASan/LSan。
+
+---
+
+## 2026-11-11 — 第 33 轮 DG-014 true-peak analyzer 第一轮（写入但未运行）
+
+**任务** DG-014 的第一轮 true-peak 工作：只新增测量工具和缺口证据，不实现 true-peak limiter，不改
+limiter 算法，不改 `app/`、JNI、Kotlin、`pcm16_processor`，不做性能 bench，不提交/推送。
+
+**实现** 新增 C99 兼容 `dsp-core/include/dreamguard/true_peak.h` 与 `dsp-core/src/true_peak.cpp`：
+
+- 4× 过采样，65-tap 线性相位 windowed-sinc（Blackman），4 个多相分支（16 tap + 中心 tap），
+  截止在输入 Nyquist；phase 0 强制为纯延迟，原始样本位置一定进入 true-peak 最大值。
+- 1–2 声道、任意分块；插值历史跨 `process` 保留；`reset` 清历史/峰值/计数；`snapshot` O(1)。
+- 报告 block/total 的 sample peak 与 true peak、frames、non_finite_samples、channel_count、
+  oversampling=4、taps=65、latency=8；dBFS 静音 clamp 到 −240。
+- NaN/±Inf 每个声道样本计数并以 0 进入历史；有限样本原样测量（>1.0 不削波）。
+- `create` 分配；`process`/`reset`/`snapshot` 不分配、不加锁、不做系统调用。
+
+**测试** 新增 `dsp-core/tests/test_true_peak.cpp`（11 组），覆盖 fs/4 45° 解析差（sample A/√2、
+true A、gap 3.01 dB）、静音/DC/Nyquist/脉冲、NaN/Inf、1/2 声道、1 帧与奇数块、分块不变性、reset、
+采样率冒烟和 dBFS helper。`test_header_c_compat.c` 追加纯 C analyzer 段。`test_limiter.cpp` 追加
+第 15 组缺口测量：−2 dBFS ceiling、fs/4 45°、A=1.2，sample peak 守约而 analyzer 预期测到约
++1.0 dBFS true peak（比 ceiling 高约 3.0 dB）；**只测量，不改算法**。CMake 把 `src/true_peak.cpp`
+接入静态库，并新增 `dg_true_peak_tests` / CTest `dg_true_peak`。
+
+**预期命令（本轮未执行）**
+
+```powershell
+cmake -S dsp-core -B dsp-core/build/native -DDREAMGUARD_DSP_BUILD_TESTS=ON
+cmake --build dsp-core/build/native --target dg_true_peak_tests dg_limiter_tests dg_header_c_compat
+ctest --test-dir dsp-core/build/native --output-on-failure -R "dg_true_peak|dg_limiter|dg_header_c_compat"
+```
+
+NDK x86_64 API 35 模拟器沿用既有 `dsp-core/build/android-test` 流程，由 Codex 独立构建并运行
+`dg_true_peak_tests`、`dg_limiter_tests`、`dg_header_c_compat`。
+
+**未运行与边界** 本会话 `pwsh` 和 `terminal_open` 都在启动阶段报
+`Error: SetNamedSecurityInfoW failed (Win32 5): grantWrite(E:\DreamGuard)`，没有执行任何命令；
+因此本轮**没有编译/运行输出**，不声称 CTest、模拟器或真机通过。没有 true-peak limiter，没有
+播放链路接入，没有与商业 true-peak 表对比，没有 ASan/LSan。`2113/0` 是新增缺口用例前的历史计数，
+不能当作当前 `dg_limiter_tests` 的计数。
+
+**文档** 同步 `dsp-core/README.md`、`docs/STATUS.md`、本日志；DG-014 保持 `IN_PROGRESS`。三处源文件头
+（`limiter.h`、`compressor.h`、`pcm16_processor.h`）的 `STATUS: UNVERIFIED` 与既有 2113/0、348/0、206/0
+证据冲突，但不在 writeScope 内，本轮只登记、未改。
+
 ---
 
 ## 2026-11-11 — 第 32 轮 DG-022 本地压缩与播完重播

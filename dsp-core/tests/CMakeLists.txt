@@ -65,6 +65,16 @@ else()
     target_compile_options(dg_limiter_tests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+# DG-014: 4x oversampled true-peak analyser (measurement only).
+add_executable(dg_true_peak_tests test_true_peak.cpp)
+target_link_libraries(dg_true_peak_tests PRIVATE dreamguard_dsp_core)
+target_compile_features(dg_true_peak_tests PRIVATE cxx_std_20)
+if(MSVC)
+    target_compile_options(dg_true_peak_tests PRIVATE /W4)
+else()
+    target_compile_options(dg_true_peak_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 # DG-022: PCM16 <-> compressor bridge used by the Android JNI layer.
 add_executable(dg_pcm16_processor_tests test_pcm16_processor.cpp)
 target_link_libraries(dg_pcm16_processor_tests PRIVATE dreamguard_dsp_core)
@@ -82,4 +92,5 @@ add_test(NAME dg_meter COMMAND dg_meter_tests)
 add_test(NAME dg_lufs COMMAND dg_lufs_tests)
 add_test(NAME dg_compressor COMMAND dg_compressor_tests)
 add_test(NAME dg_limiter COMMAND dg_limiter_tests)
+add_test(NAME dg_true_peak COMMAND dg_true_peak_tests)
 add_test(NAME dg_pcm16_processor COMMAND dg_pcm16_processor_tests)

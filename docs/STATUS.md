@@ -1,11 +1,16 @@
 # DreamGuard 任务状态台账
 
-更新日期 2026-11-11。第 32 轮完成 DG-022 的 API 35 模拟器本地播放输出验证，修复播完后本地卡无法重播。Debug 构建和 137 项 JVM 测试通过。iQOO Z9T 真机验证安排在晚上。见[开发日志](DEVLOG.md)。
+更新日期 2026-11-12。第 34 轮独立完成 DG-014 analyzer、limiter 缺口测量和 C 头兼容测试。API 35 x86_64 模拟器上 `dg_true_peak_tests` 为 215/0，新增缺口后的 `dg_limiter_tests` 为 2125/0，`dg_header_c_compat` 通过。Gradle Debug 构建通过，iQOO Z9T 真机验证待设备连接。见[开发日志](DEVLOG.md)。
 
 历史记录（**第二十六轮：主代理执行 DG-024 构建与 JVM 单测 → BUILD SUCCESSFUL、92 tests / 0 failures / 0 skipped；API 35 x86_64 模拟器安装启动，未启动 DreamGuard 声景时页面待机、系统媒体音量 33%（5/15），用音量卡滑块调到 20%（3/15），dumpsys audio 记录 setStreamVolume STREAM_MUSIC index 3 oldIndex 5 from com.dreamguard.app，页面显示 20%**。DG-024 仍 `IN_PROGRESS`：无第三方播放器共存证据、外部音量同步未可靠验证（模拟器 adb 调节未生效）、无固定输出/蓝牙/真机；不声称原生音频实时压缩或单应用音量。**本轮仅更新文档，未提交/推送**。此前第二十五轮：代码与 12 个 JVM 测试写入，当时本会话命令环境不可用、未构建/未运行。此前第二十四轮记录：API 35 x86_64 模拟器安装当前 Debug APK，验证播放状态与“本地压缩就绪”。主代理在代码提交 `4b7ace322da31f06417f3dc09a591795ba14207f`（短 `4b7ace3`）推送后，新做模拟器安装/启动，系统文件选择器选中合成的 **40 s / 44.1 kHz / 单声道 PCM16 WAV**；UI 显示播放中与“本地压缩就绪”，打开处理开关后 `checked=true`；MediaSession `PLAYING`，进程存活，`AndroidRuntime:E` 日志未见 `FATAL EXCEPTION`/`UnsatisfiedLinkError`。**边界**：只证明应用播放状态与 native 处理器准备就绪（`NativeState.READY`，库加载/句柄创建未报错），**不证明**逐块调用 `nativeProcess`、实际音频输出电平、听感、延迟/underrun、泄漏或真机通过；真机新版压缩与 30 分钟长稳未测（用户要求延后）。DG-021/022/023 仍 `IN_PROGRESS`，DG-020/013 仍 `DONE` 不标 `VERIFIED`。**第二十三轮代码已随 `4b7ace3` 提交并推送；第二十四轮日志/状态更新未提交**。**第二十三轮：DG-022 契约修正、Debug 构建与原生测试实测**。对照 media3 1.5.1 官方源码逐项复核 `BaseAudioProcessor`：其 `onFlush()` 返回 **void**，第二十二轮写成 `override fun onFlush(): Boolean` 会**编译失败**，已改为 Unit；`flush()` 由基类先清空待输出并把 pending format 写入 `inputAudioFormat`，因此新增的 `LocalAudioProcessorTest` 中“flush 后 output 为空”不是靠返回值。句柄生命周期改为：`onConfigure()` 只记录 pending 格式、**不碰**在用的 native 句柄；`onFlush()` 才在格式真正生效时创建/替换句柄，同格式 flush 只 reset 压缩机 —— 这样 media3 明确允许的“configure 之后、flush 之前仍可排队旧格式 buffer”窗口内，旧 buffer 仍使用旧句柄（新增测试断言该窗口）。`nativeCapable` 纳入 `nativeError` 判定，新增 `layoutSupported`/`nativeLibraryAvailable`/`nativeFailure`；格式提示在开关关闭时也会明示多声道/缺库/失败直通；已开启的开关始终可关闭（避免失败后 UI 把用户锁在“开”状态）；回退时同时回卷 input position；`close()` 终止并关闭处理。C++ 测试 24→**27 组**（bypass 不改变压缩器状态、立体声残帧、输出容量大于输入），C 头兼容已含 PCM16 纯 C 段（本轮未单独编译/报告）；JVM 测试 17→**18 个**。主代理交叉编译又发现 `dg_compressor_process` 输出参数类型不一致（`dg_pcm_view` vs `dg_pcm_buffer`），已把 compressor 输出改为 `dg_pcm_buffer` 并同步测试、删除残留 `const_cast`。**主代理实测（第二十三轮）**：`.\gradlew.bat --no-daemon --offline :app:testDebugUnitTest :app:assembleDebug` 成功，**80 JVM tests / 0 failures / 0 skipped**，Debug NDK 三个 ABI 编译通过；Android API 35 x86_64 模拟器交叉编译并运行 `dg_pcm16_processor_tests` **206 checks / 0 failures**、`dg_compressor_tests` **348 checks / 0 failures**；首轮 native 类型错误已修。**边界**：本轮**未运行 APK 的模拟器/真机播放**，JVM JNI 合约与 mock **不等于**实测 JNI；未做 true peak、长时间听感、多设备、真实音频输出；用户明确长时间真机测试暂缓。**第二十三轮代码已随 `4b7ace3` 提交并推送；第二十四轮日志/状态更新未提交**。DG-022/023 仍 `IN_PROGRESS`，DG-020 仍 `DONE` 不标 `VERIFIED`。**第二十二轮：DG-022 功能构建——本地 PCM16 经 JNI 进入 native C++ 压缩器**。新增 `dsp-core/include/dreamguard/pcm16_processor.h` + `src/pcm16_processor.cpp`（PCM16→float→DG-013 compressor→PCM16；512 帧定长 scratch、处理路径无逐样本分配、bit-exact bypass、残帧/奇数字节原样、饱和量化、无 lookahead）；新增 JNI surface `NativePcmProcessor`（5 符号，独立契约测试）；`LocalAudioProcessor` 改为 native 主路径，开关关闭或 native 库缺失/句柄失败/处理失败/多声道/非 direct buffer 时逐字节回退，`nativeState` 与 UI 文案可见；`PlaybackService.onDestroy` 在 `player.release()` 后 `close()` 释放句柄。测试：新增 C++ `dg_pcm16_processor`（24 组）与 JVM `LocalAudioProcessorTest`（17 个，fake 后端）+ `NativePcmProcessorContractTest`（4 个）。**边界**：本会话命令环境仍不可用（任何命令返回 `SetNamedSecurityInfoW failed (Win32 5): grantWrite(E:\DreamGuard)`），以上代码与测试在该轮未执行；第二十三轮主代理已补构建/测试（结果见开头），但仍**未运行设备播放**、未验证真实 JNI 与听感；不声称 native 真处理已在设备上通过、不声称真机已验证新版本、不声称 limiter/true peak；DG-020/022 仍不标 `VERIFIED`，DG-022 仍 `IN_PROGRESS`。**第二十一轮：iQOO Z9T 真机本地音频验证**——主代理在 iQOO Z9T（ADB model `V2352A`、manufacturer `vivo`、Android 16 / API 36）安装当前 Debug APK 成功：`versionName 0.1.0`、`versionCode 1`、SHA256 `3ABD75F122320CCE3A7BD1BD493FE6B0A867C1B8996296DD6E44621C8F4C97D2`，启动进程 pid **22780**；该 APK 与此前同批构建、**68 tests / 0 failures / 0 skipped** 的 JVM 结果对应（本轮未重新构建）。用户在 Downloads 用系统选择器打开主代理生成的 **40 s / 44100 Hz / 单声道 PCM16 WAV**，对“声音、−6 dB 开关变化、暂停恢复、爆音卡顿”的**合并询问**统一答复“**正常**”；另答复锁屏约 **15 秒**声音持续、播放其他媒体后 DreamGuard 暂停；关闭本地音轨后原有 DSP 声景正常播放，调音量/音色、暂停正常且无爆音卡顿。日志侧：进程存活、MediaSession `PAUSED`，过滤 `AndroidRuntime:E` 与 `nativeloader` 未见 `FATAL EXCEPTION` 或 `UnsatisfiedLinkError`；**未取得明确的 nativeloader 成功行**，以实际声景出声为间接证据。**边界**：不把“正常”逐项扩展成更细的听感结论；C++ PCM DSP **仍未接入**（−6 dB 是 Kotlin 整数增益，不是 C++ 压缩器/限幅器）；本次**未执行** 30 分钟长稳、蓝牙/有线/外放等多路由、多格式（仅 44.1 kHz 单声道 PCM16）、进程重建、真实峰值测量。按“交付物全部完成”口径，DG-021/022/023 仍记 `IN_PROGRESS`，不标 `DONE`/`VERIFIED`。第二十轮：**主代理真实验证**——`.\gradlew.bat --no-daemon :app:testDebugUnitTest --rerun-tasks :app:assembleDebug` 成功，**68 tests / 0 failures / 0 skipped**；Android API 35 x86_64 模拟器安装启动，系统文件选择器从 Downloads 选取合成 40 s / 44.1 kHz / 单声道 PCM16 WAV，UI 显示文件名、`16-bit PCM · 44100 Hz · 1 ch`、播放中，MediaSession `PLAYING`；打开 −6 dB 开关后 `checked=true`，暂停 UI 显示已暂停，恢复后 MediaSession `PLAYING`，无 `AndroidRuntime FATAL` 输出。**模拟器无音频输出，未听感、未真机、未实证输出波形**；当前 Kotlin 基础 −6 dB **不是** C++ 压缩器/限幅器，DSP Core 未接入。故 DG-021/022/023 仍记 `IN_PROGRESS`，只登记已实际执行的证据与剩余项。第十九轮：**本地音频最小闭环代码落地**——系统文件选择器（`ACTION_OPEN_DOCUMENT` + 持久化读授权）、复用现有 `ExoPlayer` 的本地文件播放/暂停/恢复、`LocalAudioProcessor`（`BaseAudioProcessor` 子类：16-bit PCM 逐样本 −6 dB 整数减半、bypass 逐字节 bit-exact、格式协商/flush/reset/EOS）、`LocalAudioRenderersFactory`（`DefaultAudioSink.Builder.setAudioProcessors` 注入）、最小 UI（本地音频卡 / 处理开关 / 格式提示 / 错误复用）与 10 个 JVM 测试。**本会话 pwsh 仍在启动阶段失败，构建、单测、真机、听感均未执行**，代码只经静态核对，故 DG-021/022/023 记 `IN_PROGRESS`；DG-020 沿用现有 9 符号桥、本轮无新增 JNI。第十八轮：①DG-012 高精度对照完成——主代理用 `ebur128=metadata=1` 对同一批 16 个 WAV 真实执行，**14 个可比样本 14 PASS / 0 FAIL / 0 SKIP，worst |delta| 0.010 LU**；2 例静音/0.3 s 判 **NO-DATA**（−70.000 是 `ABS_THRES` 哨兵，所有 M 块 < −70），**单列不计通过**；metadata 受 FFmpeg 0.01 LU 直方图量化约束，三位小数只是格式；DG-012 记 `DONE`、不标 `VERIFIED`；该 PASS 仅是相对 FFmpeg 9.0.2 metadata、在约 0.01 LU 分辨率下的通过，不构成标准认证。第十七轮：DG-014 峰值限制器的头文件、实现、测试与构建接线已写入；主代理实测 NDK x86_64 模拟器 **dg_limiter 2113 checks / 0 failures**，Gradle `testDebugUnitTest assembleDebug assembleRelease` 成功、三个 ABI 构建通过、JVM `up-to-date`；仅保证 sample peak，**未做过采样 true-peak 测量**，无真机/听感，代码未接入播放链路，故仍为 `IN_PROGRESS`。第十六轮：DG-012 高精度 metadata 脚本由主代理执行两次，均在 ffmpeg probe 处 exit 3（同一 ffmpeg 手工 `-version` 成功）：第一次是 `Select-Object -First 1` 提前终止管道，第二次是版本正则的 `$` 在 Windows CRLF 下不匹配；已修为完整捕获 + 真实 exit code + 无行锚点的全文版本行搜索，**修复后尚未重跑，无新报告**。第十五轮：**参考对照首次真实执行**——主代理用预生成模式对同一批 16 个 WAV 调用 FFmpeg 9.0.2 `ebur128`，得 **14 PASS / 2 FAIL / 0 SKIP，最大绝对差 0.049 LU（`stereo_10kHz_-20dB_48k`），整体 exit 1**。两项 FAIL 都是 `kind=undefined` 的定义问题（2 s 数字静音、0.3 s 短于一个 400 ms 块）：我方 `integrated_ready=0` 且 `integrated=-inf`，ffmpeg 打印 **−70.0**——按 FFmpeg 源码该值是 `ABS_THRES` 哨兵而不是测量结果（`libavfilter/f_ebur128.c`：`#define ABS_THRES -70`；`init()` 里 `ebur128->integrated_loudness = ABS_THRES;`；`filter_frame()` 只在某个 400 ms 块 `loudness_400 >= ABS_THRES` 且 `nb_integrated > 0` 时才覆盖它，静音时该块为 −120.7 LUFS、0.3 s 时 400 ms 缓存根本没填满，于是字段停在初值），因此两项**保持未通过 / 需人工裁定**，不放宽、不改判、不改核心实现。同时登记精度事实：ffmpeg 汇总行是 `I: %5.1f LUFS`，分辨率只有 **0.1 LU**，0.049 LU 与打印取整同量级，0.1 LU 容差只等于 1 个量化步。DG-012 仍 `IN_PROGRESS`、LUFS 仍 `PROVISIONAL`；DG-013 是独立的压缩器测试链（348/0、无听感/真机证据、未接播放），不受本轮影响。第十四轮：①`dg_lufs_compare --selfcheck` 修正后由主代理重跑，**115 checks / 0 failures**（比修前多 2 条，正是新增的静音段 `momentary`/`isfinite` 检查，计数变化本身就是“跑的是新二进制”的证明），DG-012 的**工具自检**首次全绿。②对照侧出现现实条件：FFmpeg **9.0.2** 已位于 `dsp-core/build/reference-deps/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v9.0.2.exe`（仅构建目录内，非系统安装）；但本机无 Windows C++ 编译器，故 `compare_with_ffmpeg.ps1` 新增**预生成输入模式**（`-Csv` + `-WavDir`，直接吃“NDK 编译的 Android 工具在模拟器上生成的 CSV + WAV，再 `adb pull` 回来”的产物，保留原生工具模式），并把静音/0.3 s 两类用例改为**定义问题**处理（`kind=undefined`：双方都无值记 `SKIP` 且**不计入通过**，我方给出数值或参考给出数值则 `FAIL`，绝不静默通过），报告新增 CSV/WAV 的 SHA256 与同名 `.csv` 副产物，且明确**不删除任何输入文件**。本会话 `pwsh` 仍在启动阶段失败，**一次对照都没跑**，`reference-report.md` 尚不存在 ⇒ DG-012 仍 `IN_PROGRESS`、LUFS 仍 `PROVISIONAL`。第十三轮：两件真实验证——①DG-013 重跑得 **348 checks / 0 failures**，扩展后的 `dg_header_c_compat` PASSED，Gradle `testDebugUnitTest assembleDebug assembleRelease` 成功、Debug/Release 三 ABI 构建通过、JVM `up-to-date`；压缩器的信号级验收达成，但**无听感、无真机、未接入播放链路**，故登记 `DONE` 而**不标 `VERIFIED`**。②DG-012 的对照工具 `dg_lufs_compare --selfcheck` 首次由主代理用 NDK x86_64 编译并在 API 35 模拟器执行，得 **113 checks / 1 failure**：`mono_levelstep_4s_1s_2s_48k: expected >= 60 blocks above the absolute gate`。根因是**工具自身的信号生成缺陷**（`fill_sine` 乘的是 case 的 −20 dBFS 电平，把 −50 dB 当相对比例传入，安静段实际落到 −70 dBFS，整段掉到 −70 LUFS 绝对门以下），本会话已改为绝对 −50 dBFS（与 `tests/test_lufs.cpp` 的 gating 用例同一构造），并新增“安静段 `momentary` 等于解析值”的检查以防同类错误复现；**修正后待重跑**，DG-012 仍 `IN_PROGRESS`、LUFS 仍 `PROVISIONAL`，与 ffmpeg/libebur128 的对照依旧零执行。第十二轮：DG-013 首次真实运行——主代理在 NDK x86_64 + API 35 模拟器上跑出 **334 checks / 2 failures**；两处失败经分析**均为测试期望错误**（`output_peak_db` 是“整块峰值，含 attack”，被错当稳态值；浮点样本无法恰好落在阈值上），已按解析值改写测试、新增“明确低于阈值 bitwise 0”与“double 精确阈值”检查，**修正后待重跑**，DG-013 仍只登记 `IN_PROGRESS`。第十一轮：主代理首次在 **NDK x86_64 真实编译** DG-013 测试即**失败**——`compressor.h:161` 报 `warning: '/*' within block comment`，声明被注释吞掉后引发多处 `use of undeclared identifier 'dg_compressor_process'`。根因是本会话第十轮合并 `dg_compressor_process` 注释时漏掉注释结尾 `*/`，已修复（补回 `*/` 并复核头文件全部注释闭合）；修正后**尚待主代理重测**，DG-013 仍只登记 `IN_PROGRESS`，压缩器仍未接入播放链路。第十轮：按用户授权推进 DG-013 最小压缩器——新增 `dsp-core/include/dreamguard/compressor.h`、`dsp-core/src/compressor.cpp`、`dsp-core/tests/test_compressor.cpp`（16 组）、CMake 接线与 C 头兼容冒烟。第十轮本会话 `pwsh` 仍在启动阶段报同一 ACL 错误，这三个文件从未在本会话编译、运行。DG-012 的对照工具链同样仍未执行，DG-012 保持 `IN_PROGRESS`、LUFS 仍 `PROVISIONAL`。第九轮：写好 DG-012 的参考工具对照工具链但**未执行**——新增 `dsp-core/tools/lufs_compare/`（`dg_lufs_compare` 16 例确定性合成信号 + `--wav-dir/--csv/--selfcheck/--libebur128`、`compare_with_ffmpeg.ps1` 驱动 ffmpeg `ebur128` 并按 0.1 LU 判定、CTest `dg_lufs_compare`），本会话 `pwsh` 仍在启动阶段报同一 ACL 错误，无法编译/运行/跑 ffmpeg，因此**零个对照数字**被登记，DG-012 保持 `IN_PROGRESS`、LUFS 仍 `PROVISIONAL`。第八轮：主代理复测修复后的 DG-012——`dg_lufs` **238 checks / 0 failures**（gating 诊断 `blocks=67 after_abs=61 used=40 integrated=-23.1696`）、`dg_meter` 207/0、扩展后的 `dg_header_c_compat` PASSED；Gradle `testDebugUnitTest assembleDebug assembleRelease` 成功，Debug/Release 三 ABI 均已构建；JVM `up-to-date`。第七轮曾首跑得 227/2，两处失败为 gating 用例漏算单声道 −3.0103 LU 的测试期望错误，已修正。第五轮由主代理复测别名修正代码：Gradle 构建成功、PCM 测试 **139 checks / 0 failures**，DG-011 为 `DONE`，不标 `VERIFIED`）
 
 本文件记录 Phase 0 / Phase 1 已触碰任务的**实际**状态、目标、交付物、验收条件与可核实证据。
 `docs/ROADMAP.md` 定义任务，本文件登记执行结果；两者冲突时以本文件的证据为准。
+
+> **证据口径说明（2026-11-11）**：`dg_limiter` **2113/0**、`dg_compressor` **348/0**、
+> `dg_pcm16_processor` **206/0** 均已由主代理在 NDK x86_64 API 35 模拟器实际运行。`limiter.h`、
+> `compressor.h`、`pcm16_processor.h` 三个文件头仍写着 `STATUS: UNVERIFIED`，与本台账冲突；这三处
+> 源文件不在本轮 writeScope 内，本轮**未改**，在此登记待修，避免把旧状态继续当作现状。
 
 ## 2026-11-10 路线优先级调整
 
@@ -44,7 +49,7 @@
 | DG-011 PCM 基础处理 | `DONE` | PCM 测试 **139 checks / 0 failures / PASSED**（最新别名修正代码，24 组，API 35 模拟器）；未接入播放链路、未处理真实音频，故不标 `VERIFIED` | 第五轮 NDK 交叉编译 + 模拟器输出 |
 | DG-012 基础响度分析 | `DONE`（**不标 `VERIFIED`**） | 交付物已写入；x86_64 修复后 `dg_lufs` **238/0**、`dg_meter` **207/0**、扩展 C 头兼容 PASSED；Debug/Release 三 ABI 均构建通过，JVM up-to-date。参考对照工具链（`dsp-core/tools/lufs_compare/`）第十三轮首次真实执行 `--selfcheck` 得 113/1（工具信号缺陷：电平阶跃安静段实为 −70 dBFS），已修并加安静段 `momentary` 解析值检查，**第十四轮重跑 115 checks / 0 failures**（计数 +2 即新检查项）——工具自检全绿。但自检证明的是“实现与自身公式自洽 / 工具自身无缺陷”，**不是**与标准一致；**第十五轮完成首次真实对照**（`-Csv/-WavDir` 预生成模式 + FFmpeg 9.0.2 `ebur128`，16 例全部有读数：**14 PASS / 2 FAIL / 0 SKIP**，最大绝对差 **0.049 LU**，整体 **exit 1**，报告 `dsp-core/build/lufs-compare-android/reference-report.md`）。2 项 FAIL 均为 `kind=undefined` 的定义问题（静音、0.3 s：我方 `-inf`/`ready=0`，ffmpeg 报绝对门哨兵 −70.0），**保持未通过、待人工裁定**。ffmpeg 汇总只打印到 0.1 LU（`%5.1f`），0.049 与取整同量级 ⇒ 误差表已有数字，但对照**整体未通过**、分辨率就是 0.1 LU。第十六轮改用三位小数 metadata 主判据；主代理首次执行在高精度路径的 ffmpeg probe 处 exit 3，已定位为管道提前终止导致的假失败并修复。**第十八轮：高精度 metadata 对照真实执行完成**——同一 CSV（SHA256 `B4106C5E…18B138C`）+ 16 个 WAV，FFmpeg 9.0.2 `ebur128=metadata=1`，**14 个可比样本 14 PASS / 0 FAIL / 0 SKIP，worst |delta| 0.010 LU**（`stereo_asym_L-6_R-12dB_48k` 与 `stereo_1k_-20dB_192k`）；2 例静音/0.3 s 判 **NO-DATA**（silence 1、sub-400ms 1：metadata `I=-70.000` 是 `ABS_THRES` 哨兵，全部 M 块 < −70），**单列、不计入 PASS、不是数值通过**；有效分辨率约 0.01 LU（`HIST_GRAIN=100`），三位小数只是格式。报告 `reference-report-metadata.md`。真机与泄漏检测未做，故记 `DONE`、**不标 `VERIFIED`** | 第八轮三 ABI 构建 + 第十三轮 selfcheck 113/1 + 第十四轮 selfcheck 115/0 + 第十五轮 14/2/0（0.049 LU，summary-only）+ **第十八轮 metadata 14/0/2（worst 0.010 LU，verdict PASS）**
 | DG-013 动态压缩器 | `DONE`（**不标 `VERIFIED`**） | 真实验证链：第十一轮首次编译失败（`compressor.h` 注释未闭合，已修）→ 第十二轮 **334/2**（两处均为测试期望错误，已改写）→ 第十三轮重跑 **348 checks / 0 failures**，`dg_header_c_compat` PASSED，Gradle Debug/Release 三 ABI 构建成功、JVM up-to-date。**第二十三轮输出参数类型修正后（`dg_pcm_view` → `dg_pcm_buffer`）在 API 35 x86_64 模拟器重跑 `dg_compressor_tests`：348 checks / 0 failures**。测试信号级验收达成；“无明显爆音或抽吸”仍**无听感/真机证据**，虽已接入 PCM16 桥但没有设备播放验证，故不标 `VERIFIED` | 第十二轮 334/2 + 第十三轮 348/0 + **第二十三轮类型修正后 348/0** 模拟器输出 |
-| DG-014 峰值限制器 | `IN_PROGRESS` | 头文件、实现、测试与 CMake/CTest 接线已写入；设计明确只约束 **sample peak**，无过采样、无 true-peak 保证。主代理实测（NDK x86_64 API 35 模拟器）**dg_limiter 2113 checks / 0 failures**；Gradle `testDebugUnitTest assembleDebug assembleRelease` 成功、三个 ABI 构建通过、JVM `up-to-date`。但 true-peak 过采样测量、真机、听感、播放链路接入均未做，验收“峰值目标得到实际测量验证”只覆盖 sample peak，不标 `DONE`/`VERIFIED` | 主代理第十七轮模拟器输出 + Gradle 构建输出；无 true-peak/真机证据 |
+| DG-014 峰值限制器 | `IN_PROGRESS` | 4× true-peak analyzer 已通过 API 35 x86_64 模拟器 215/0。新增缺口测量后的 sample-peak limiter 测试为 2125/0，C 头兼容通过。−2 dBFS ceiling 下，当前 limiter 的 true peak 实测约 +1.012 dBFS，证明过冲缺口；limiter 算法和播放链路未改，iQOO 真机与 true-peak limiter 接入待后续。 | [第 34 轮开发日志](DEVLOG.md) |
 | DG-020 JNI Bridge | `DONE`（**不标 `VERIFIED`**） | 第二十二轮新增独立 PCM surface：`NativePcmProcessor` 的 5 个 `native*` 符号（create/process/reset/destroy/version），与声景引擎 9 符号按类前缀隔离。**第二十三轮实测**：`NativePcmProcessorContractTest` 包含在 80 JVM tests / 0 failures 中，Debug 三个 ABI 的 `libdreamguard_dsp.so` 编译链接通过；但**没有设备上的 JNI 运行证据**——JVM 合约测试与 mock 不等于实测 JNI。**第二十四轮**模拟器播放显示“本地压缩就绪”，可间接说明库加载与 `nativeCreate` 未报错，但 `nativeProcess`/`reset`/`destroy` 仍无设备证据。既有 9 符号的创建/处理/释放证据仍是第四轮模拟器 1328/0 | 80 JVM tests + 三 ABI 构建 + **第二十四轮 READY 间接证据**；**无 nativeProcess 设备证据** |
 | DG-021 Media3 播放器 | `IN_PROGRESS` | 第二十轮主代理在 Android API 35 x86_64 模拟器安装启动，系统选择器从 Downloads 选 40 s / 44.1 kHz / 单声道 PCM16 WAV；UI 显示文件名、`16-bit PCM · 44100 Hz · 1 ch`、播放中，`dumpsys media_session` 为 `PLAYING`；暂停显示已暂停、恢复后 `PLAYING`。第二十一轮已在 iQOO Z9T（V2352A / vivo / Android 16 API 36）真机安装同批 Debug APK（0.1.0 / versionCode 1 / SHA256 `3ABD75F1…F4C97D2`，pid 22780），用户用系统选择器播放 40 s / 44.1 kHz / 单声道 PCM16 WAV，对声音、−6 dB、暂停恢复、爆音卡顿**合并答复“正常”**；锁屏约 15 s 持续、播其他媒体后暂停。**第二十三轮只构建了 Debug APK，未安装/未运行**；**第二十四轮已安装启动当前 Debug APK，系统选择器选 40 s / 44.1 kHz / mono PCM16 WAV，UI 播放中、MediaSession `PLAYING`、进程存活、`AndroidRuntime:E` 无 FATAL/UnsatisfiedLinkError**；仍无音频输出/波形/听感、播放进度 UI、多格式/多路由/进程重建/30 分钟长稳，故不满足 `DONE` | 第二十轮模拟器记录；**第二十一轮 iQOO Z9T 用户操作记录**（“正常”为合并答复，对应旧 Kotlin −6 dB 链路）；**第二十四轮模拟器播放状态证据（非音频输出）** |
 | DG-022 AudioProcessor | `IN_PROGRESS` | 本地 PCM16 已接入 Media3 和 C++ 压缩器。第 32 轮在 API 35 模拟器观察到 `ACTIVE`，两档输入的输出 RMS 在开启时分别降低约 6.1 dB 和 13.3 dB。暂停恢复及本地卡播完重播通过，iQOO Z9T 真机验证待补。 | [第 32 轮开发日志](DEVLOG.md) |
@@ -764,23 +769,48 @@
 **目标**（`docs/ROADMAP.md:154-157`）：实现峰值检测、True Peak 检测策略、限制器、过采样验证和极端输入测试。
 **验收**：峰值目标得到实际测量验证。
 
-**交付物（第十七轮写入；主代理已在 NDK x86_64 模拟器运行测试）**
+**交付物（第十七轮 limiter；第三十三轮 true-peak analyzer）**
 
 | 文件 | 内容 |
 | --- | --- |
 | `dsp-core/include/dreamguard/limiter.h` | C99 兼容 API、sample-peak/true-peak 边界说明、参数区间、别名与延迟契约 |
 | `dsp-core/src/limiter.cpp` | 前馈 sample-peak lookahead 限制器：每帧所需增益 → 滑动最小值 → 即时 attack/单极点 release → 延迟线输出 |
-| `dsp-core/tests/test_limiter.cpp` | 14 组主机测试：参数、NULL/描述符/重叠、延迟、脉冲、跨块/声道、flush/reset、原地、NaN/Inf、极端参数 |
-| `dsp-core/tests/test_header_c_compat.c` | 追加纯 C DG-014 段：create → process → snapshot → flush → destroy |
-| `dsp-core/CMakeLists.txt`、`dsp-core/tests/CMakeLists.txt` | `src/limiter.cpp` 进静态库；`dg_limiter_tests` + CTest `dg_limiter` |
+| `dsp-core/tests/test_limiter.cpp` | 14 组主机测试 + 第 15 组 true-peak 缺口测量：参数、NULL/描述符/重叠、延迟、脉冲、跨块/声道、flush/reset、原地、NaN/Inf、极端参数 |
+| `dsp-core/include/dreamguard/true_peak.h`、`src/true_peak.cpp` | 4× 过采样 true-peak analyzer：65-tap 多相 windowed-sinc、1/2 声道、分块、reset、snapshot、非有限值计数；process/reset/snapshot 不分配 |
+| `dsp-core/tests/test_true_peak.cpp` | 11 组：fs/4 45° 解析差、静音/DC/Nyquist/脉冲、NaN/Inf、1/2 声道、1 帧/奇数块、分块不变性、reset、采样率冒烟 |
+| `dsp-core/tests/test_header_c_compat.c` | 追加纯 C DG-014 段：limiter create → process → snapshot → flush → destroy；analyzer create → process → snapshot → destroy |
+| `dsp-core/CMakeLists.txt`、`dsp-core/tests/CMakeLists.txt` | `src/limiter.cpp`、`src/true_peak.cpp` 进静态库；`dg_limiter_tests` / `dg_true_peak_tests` + CTest `dg_limiter` / `dg_true_peak` |
+
+**第三十三轮：4x true-peak analyzer（第一轮；第 34 轮已独立验证）**
+
+- 新增 `dg_true_peak`：C99 头文件 + C++ 实现，测量 1–2 声道 Float32 流。滤波器为
+  65-tap 线性相位 windowed-sinc（Blackman，4 个多相分支 × 16 tap + 中心 tap），截止在输入
+  Nyquist 的 1/4 上采样 Nyquist；phase 0 强制为纯延迟，因此样本经过 8 帧中心延迟后，原始样本位置
+  一定进入 true-peak 最大值（`true_peak >= sample_peak`）；短于该延迟的流可能低估尾部，头文件已注明。
+  固定群延迟 8 帧，仅作测量延迟。
+- 报告字段：`sample_peak_*` / `true_peak_*`（最近一次非空 process）、`total_*`（create/reset 以来）、
+  `frames`、`non_finite_samples`、`channel_count`、`oversampling_factor=4`、`filter_taps=65`、
+  `filter_latency_frames=8`。静音 dBFS clamp 到 −240，snapshot 不因坏样本产生 NaN/Inf。
+- NaN/±Inf 每个声道样本计数一次并以 0 进入插值历史；有限样本原样使用（>1.0 也照测，不做削波）。
+- 分块：插值历史跨 process 保留，`total_*` 与分块方式无关（逐帧算术相同，测试要求逐位相等）；
+  block 峰值只描述最后一次非空调用。process/reset/snapshot 不分配、不加锁、不做系统调用。
+- 解析用例：fs/4、45°、幅度 A 的正弦，样本恒为 ±A/√2，重建峰值应为 A。测试断言
+  `sample_peak≈0.707107`、`true_peak≈1.0`、两者差≈3.01 dB，并打印实测值。
+- 缺口测量：`test_limiter.cpp` 第 15 组把 -2 dBFS ceiling 的 limiter 输出送入 analyzer。输入为
+  fs/4、45°、A=1.2；limiter 的 sample peak 守约（≤ ceiling、`over_ceiling_samples==0`、
+  `limited_samples>0`），但 analyzer 预期测到约 **+1.0 dBFS** 的 true peak，比 ceiling 高约
+  3.0 dB。该用例**只证明当前 limiter 的缺口，不修改算法**，也不把 limiter 变成 true-peak limiter。
+- **第 34 轮独立运行**：使用 NDK x86_64 API 35 模拟器 `ime35`，`dg_true_peak_tests` **215 checks / 0 failures**，新增缺口用例后的 `dg_limiter_tests` **2125 checks / 0 failures**，`dg_header_c_compat` **PASSED**。Gradle `:app:testDebugUnitTest :app:assembleDebug` **BUILD SUCCESSFUL**，构建重新编译并链接了三 ABI。本轮没有宿主 CTest、真机、ASan/LSan、商业 true-peak 对照或播放链路接入。
 
 **sample peak 与 true peak 的区别（设计前提，不是验收结果）**
 
 - **sample peak**：`max |x[n]|`，只检查存储样本；本限制器测量并约束的就是它。
 - **true peak / inter-sample peak**：重建连续波形后的最大值，可能落在两个样本之间。带限内容、有损编码或采样率转换后，
   即使所有样本都 ≤ ceiling，重建波形仍可能过冲。
-- 本实现**没有过采样、没有重建滤波器**，因此不检测、也不衰减这种过冲；`limiter.h` 明确禁止把它描述成
-  true-peak limiter 或“标准认证”。路线图要求的“过采样验证”**未实现**，所以 DG-014 的验收项不能算通过。
+- 本 limiter 实现**没有过采样、没有重建滤波器**，因此不检测、也不衰减这种过冲；`limiter.h` 明确禁止把它
+  描述成 true-peak limiter 或“标准认证”。第三十三轮新增的是**独立的 analyzer**（只测量，不限制），
+  limiter 本身仍未实现 true-peak 检测或衰减；路线图要求的“过采样验证”现在有了测量工具，但还没有
+  true-peak limiter，也没有本轮运行输出，所以 DG-014 的验收项仍不能算通过。
 
 **算法与安全论证**
 
@@ -802,34 +832,51 @@
 - 覆盖的极端输入：0 dBFS ceiling、−60 dBFS ceiling、20 ms @ 192 kHz（3840 帧延迟）、0 延迟、最长/最短 release、
   满幅脉冲落在最后一帧（必须经 flush 后仍不超 ceiling）、NaN/±Inf、纯静音、5 种采样率 × 单/双声道。
 
-**测试矩阵（14 组；主代理实测 2113 checks / 0 failures）**
+**测试矩阵（limiter 第 15 组为本轮新增；2113/0 是新增缺口用例前的历史计数）**
 
 - create 全参数边界与 NaN/Inf；NULL 句柄、空 samples、声道/帧数不匹配、部分重叠拒绝、零帧 no-op；
 - 延迟精确等于 `ceil(...)`，低于 ceiling 的信号逐位延迟直通；脉冲只出现在第 `latency` 帧且等于 ceiling；
 - 跨 ceiling（−0.1/−1/−6/−20 dBFS）× 采样率（8k/48k/192k）× lookahead（0/1/10 ms）× 单双声道的采样峰值界；
 - linked/unlinked 立体声比例；1 次 vs 37 帧分块逐位一致；flush 尾块、flush 后新流；reset；
-- 原地与分路逐位一致；NaN/Inf 计数并输出 0；最后一帧脉冲；5 种采样率 × 单/双声道冒烟。
+- 原地与分路逐位一致；NaN/Inf 计数并输出 0；最后一帧脉冲；5 种采样率 × 单/双声道冒烟；
+- **第 15 组（本轮新增）**：fs/4 45°、A=1.2、ceiling −2 dBFS 的 limiter 输出，断言 sample peak 守约，
+  并预期 analyzer 测到约 +1.0 dBFS true peak；只证明缺口，不改算法。该组尚未运行，故当前
+  `dg_limiter_tests` 的 checks 总数未知，不能继续引用 2113/0 作为“当前文件”的计数。
 - 静态复核时发现并修正了一个**满窗口单调队列覆盖 front** 的潜在 bug（原实现先插入后过期，窗口满时
   `tail == head` 会覆盖最小值），并新增“required gain 单调递增填满窗口”的用例。该修正已随主代理本轮
   2113/0 的运行一起执行；仍未做变异测试或逐行覆盖率统计。
 
+**analyzer 测试矩阵（11 组；写入但未运行）**
+
+- create 参数边界/ORDER、NULL、零帧 no-op、声道不匹配、空 samples；
+- fs/4 45° 解析差（sample A/√2、true A、gap 3.01 dB）、静音/DC/Nyquist/脉冲；
+- NaN/±Inf 计数与 0 替换、snapshot 值有限、全坏块为 0/−240 dBFS；
+- 单/双声道独立性、1 帧与奇数块、1 次 vs 1/3/1000 帧分块总量逐位一致；
+- reset 清空历史/峰值/计数；5 种采样率 × 单/双声道冒烟；dBFS helper（含 0、负数、NaN、+Inf）。
+
 **未执行与证据边界（不得含糊）**
 
 - 本会话 `pwsh` 仍在启动阶段失败（`Error: SetNamedSecurityInfoW failed (Win32 5):
-  grantWrite(E:\DreamGuard)`），因此**本会话没有编译/运行**；下面的实测数字来自主代理，不是本会话。
+  grantWrite(E:\DreamGuard)`），`terminal_open` 同样失败，因此**第 33 轮没有编译/运行**；
+  下面的 2113/0 来自主代理第十七轮，不是本轮结果。
 - 主代理实测：NDK x86_64 API 35 模拟器 `dg_limiter` **2113 checks / 0 failures**；Gradle
   `testDebugUnitTest assembleDebug assembleRelease` 成功，Debug/Release 三个 ABI 构建通过，JVM `up-to-date`。
-  这证明 `dg_limiter` 的 sample-peak 测试链在该配置下通过，不证明 true peak；`dg_header_c_compat` 的
-  DG-014 纯 C 段虽已写入，但本轮没有单独给出它的运行输出，不能把 2113 这个数字移用到 C 头兼容上。
-- 没有 true-peak 过采样测量、没有与商业限制器对比、没有听感测试、没有真机、没有 ASan/LSan。
-- **未接入播放链路**：`app/` 的 Kotlin/JNI 一行未改，没有新增 JNI 符号；但 `src/limiter.cpp` 已进
-  `dreamguard_dsp_core` 静态库，Android 构建会把它编进 `libdreamguard_dsp.so`，本轮 Gradle 三 ABI 构建成功
-  说明编译兼容性已实际验证，但运行期播放链路仍未接入。
-- 因此“峰值目标得到实际测量验证”**只完成了 sample-peak 部分**：测试测量了 sample peak，但路线图要求的
-  true-peak 检测策略/过采样验证仍未实现，不能宣称 DG-014 验收通过，更不能宣称 true-peak 验收通过。
+  这证明新增缺口用例之前的 sample-peak 测试链在该配置下通过，不证明 true peak；本轮给
+  `test_limiter.cpp` 增加了第 15 组、给 `test_header_c_compat.c` 增加了 analyzer 段，因此 2113 和旧的
+  C 头 PASSED 都不能直接当作当前文件的运行结果。
+- 本轮新增了 4× true-peak **analyzer**，但没有它的编译/运行输出，也没有与商业 true-peak 表对比；
+  没有 true-peak **limiter**、没有听感测试、没有真机、没有 ASan/LSan。
+- **未接入播放链路**：`app/` 的 Kotlin/JNI、`pcm16_processor` 一行未改，没有新增 JNI 符号；但
+  `src/true_peak.cpp` 已进 `dreamguard_dsp_core` 静态库，下一次 Android 构建会把它编进
+  `libdreamguard_dsp.so`。本轮没有执行该构建，不能声称编译兼容性已验证，更不能声称运行期链路接入。
+- 因此“峰值目标得到实际测量验证”**只完成了 sample-peak 部分**：sample peak 有历史实测，true-peak
+  现在有 analyzer 代码和测试但**没有运行证据**；limiter 仍只约束 sample peak。不能宣称 DG-014 验收通过，
+  更不能宣称 true-peak limiter 或播放链路完成。
 
-**状态**：`IN_PROGRESS`（不标 `DONE`，不标 `VERIFIED`）。sample-peak 测试已在 x86_64 模拟器通过；下一步仍需
-至少 4× 过采样测量输出 true peak，并补真机/听感/播放链路证据。
+**状态**：`IN_PROGRESS`（不标 `DONE`，不标 `VERIFIED`）。sample-peak 测试已在 x86_64 模拟器通过（历史
+2113/0）；第 33 轮补了 4× true-peak analyzer、测试和 limiter 缺口测量，但**未运行**。下一步：由 Codex
+在 NDK x86_64 API 35 模拟器构建并运行 `dg_true_peak_tests`、`dg_limiter_tests`、`dg_header_c_compat`，
+核对缺口数值；然后决定是否实现 true-peak 限制策略，并补真机/听感/播放链路证据。
 
 ---
 
@@ -1776,11 +1823,12 @@ ctest --test-dir .\dsp-core\build\native --output-on-failure -C Debug
 - 压缩器**没有**限幅器、true peak 检测、lookahead、侧链、并行混合或自动 release；makeup 为正时输出可超
   0 dBFS（计数不削波），这些都属于 DG-014 或以后的迭代，不在 DG-013 的交付范围内。
 - 第十七轮 DG-014 的 limiter **只保证采样峰值**：`process` 对每个输出样本施加 `gain <= ceiling/|x|`，但没有
-  过采样或重建，因此**不能**保证样本间（true）峰值，也没有做过任何 true-peak 测量。它未接入播放链路、未新增
+  过采样或重建，因此**不能**保证样本间（true）峰值；第十七轮当时也没有做过任何 true-peak 测量。第三十三轮
+  补了独立的 4× analyzer（只测量、未运行），limiter 本身仍没有过采样/重建，也未接入播放链路、未新增
   JNI/Kotlin 调用；`src/limiter.cpp` 已进静态库，第十七轮主代理 Gradle 三 ABI 构建已实际通过，但本会话仍未
   验证，且 true-peak 验收不能据此成立。
-  该组件的 sample-peak 测试已由主代理在第十七轮实际运行（**2113 checks / 0 failures**），但 true-peak
-  过采样测量与听感仍未实现/未运行，**不得**把 2113/0 移用为 true-peak 证据，也不得声称“true peak 已实测通过”。
+  该组件的 sample-peak 测试已由主代理在第十七轮实际运行（**2113 checks / 0 failures**），但第三十三轮
+  analyzer 尚无运行输出、听感仍未做，**不得**把 2113/0 移用为 true-peak 证据，也不得声称“true peak 已实测通过”。
 - 新增的 `src/compressor.cpp` 已加入 `dreamguard_dsp_core` 静态库，而 Android 侧
   `app/src/main/cpp/CMakeLists.txt` 以子目录方式引入 dsp-core，因此**下一次 Gradle/NDK 构建会把该翻译单元
   编进 `libdreamguard_dsp.so`**（无 JNI 符号、无 Kotlin 调用，行为不变，但构建面扩大了）。第二十轮主代理
