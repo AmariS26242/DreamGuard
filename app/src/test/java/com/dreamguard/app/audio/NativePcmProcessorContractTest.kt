@@ -4,6 +4,7 @@ import java.io.File
 import java.lang.reflect.Modifier
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -72,6 +73,22 @@ class NativePcmProcessorContractTest {
         )
     }
 
+    @Test
+    fun `proguard rules keep NativePcmProcessor native methods unminified`() {
+        val rules = proguardRulesFile()
+        assertNotNull(
+            "proguard-rules.pro not found from ${File("").absoluteFile}",
+            rules,
+        )
+        val normalized = rules!!.readText().replace(Regex("\\s+"), " ")
+        assertTrue(
+            "proguard-rules.pro must preserve NativePcmProcessor JNI entry points",
+            normalized.contains(
+                "-keepclasseswithmembernames class com.dreamguard.app.audio.NativePcmProcessor { native <methods>; }",
+            ),
+        )
+    }
+
     private fun declaredNativeMethods(): List<String> =
         NativePcmProcessor::class.java.declaredMethods
             .filter { Modifier.isNative(it.modifiers) }
@@ -80,6 +97,11 @@ class NativePcmProcessorContractTest {
 
     private fun jniBridgeFile(): File? =
         listOf("src/main/cpp/jni_bridge.cpp", "app/src/main/cpp/jni_bridge.cpp")
+            .map(::File)
+            .firstOrNull { it.isFile }
+
+    private fun proguardRulesFile(): File? =
+        listOf("proguard-rules.pro", "app/proguard-rules.pro")
             .map(::File)
             .firstOrNull { it.isFile }
 

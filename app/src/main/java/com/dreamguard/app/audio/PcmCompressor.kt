@@ -36,6 +36,10 @@ internal interface PcmCompressor {
         outputCapacity: Int,
     ): Int
 
+    /** Lookahead latency in frames retained by [process] and emitted by [drain]. */
+    val latencyFrames: Int
+        get() = 0
+
     fun reset(handle: Long)
 
     /** Emits retained PCM at EOS/before bypass. At most 256 bytes (64 stereo frames). */
@@ -70,6 +74,9 @@ internal object JniPcmCompressor : PcmCompressor {
         outputOffset,
         outputCapacity,
     )
+
+    override val latencyFrames: Int
+        get() = 64
 
     override fun reset(handle: Long) {
         check(NativePcmProcessor.reset(handle) == 0) { "native reset failed" }

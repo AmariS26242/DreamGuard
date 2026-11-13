@@ -1,0 +1,8 @@
+﻿UTC=2026-11-13T16:07:02.4358579Z
+NDK=27.0.12077973
+ABI=x86_64 API=26 Release c++_static
+Serial=emulator-5554
+Android/sdk_phone64_x86_64/emu64x:15/AE3A.240806.019/12368160:userdebug/test-keys
+Linux localhost 6.6.30-android15-8-gdd9c02ccfe27-ab11987101 #1 SMP PREEMPT Tue Jun 18 20:50:32 UTC 2024 x86_64 Toybox
+source_commit=acc1d0bd73bfbe738e207893cd8d60774f7a5321
+source_dirty= .github/workflows/android-ci.yml                   |   3 +  app/proguard-rules.pro                             |   3 +  app/src/debug/AndroidManifest.xml                  |   6 +  .../dreamguard/app/audio/LocalAudioProcessor.kt    | 371 ++++++++++++-  .../java/com/dreamguard/app/audio/PcmCompressor.kt |   7 +  .../com/dreamguard/app/audio/JniContractTest.kt    |  22 +  .../app/audio/LocalAudioProcessorTest.kt           | 603 ++++++++++++++++++++-  .../app/audio/NativePcmProcessorContractTest.kt    |  22 +  dsp-core/tools/bench/run_android.ps1               |  12 +-  9 files changed, 1028 insertions(+), 21 deletions(-)

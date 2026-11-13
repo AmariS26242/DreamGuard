@@ -1,0 +1,14 @@
+com.dreamguard.app.audio.AudioSettingsTest: 3 tests / 0 failures / 0 skipped
+com.dreamguard.app.audio.JniContractTest: 4 tests / 0 failures / 0 skipped
+com.dreamguard.app.audio.LocalAudioProcessorTest: 31 tests / 0 failures / 0 skipped
+com.dreamguard.app.audio.NativeAudioEngineTest: 14 tests / 0 failures / 0 skipped
+com.dreamguard.app.audio.NativePcmProcessorContractTest: 5 tests / 0 failures / 0 skipped
+com.dreamguard.app.audio.PlaybackControllerTest: 17 tests / 0 failures / 0 skipped
+com.dreamguard.app.audio.PlaybackFailurePolicyTest: 8 tests / 0 failures / 0 skipped
+com.dreamguard.app.audio.PlaybackLayersTest: 5 tests / 0 failures / 0 skipped
+com.dreamguard.app.audio.PlaybackRecoveryPolicyTest: 8 tests / 0 failures / 0 skipped
+com.dreamguard.app.audio.SleepTimerEngineTest: 27 tests / 0 failures / 0 skipped
+com.dreamguard.app.audio.SleepTimerRecoveryTest: 9 tests / 0 failures / 0 skipped
+com.dreamguard.app.audio.SleepTimerVolumeGuardTest: 9 tests / 0 failures / 0 skipped
+com.dreamguard.app.audio.SystemMediaVolumeTest: 12 tests / 0 failures / 0 skipped
+TOTAL: 152 tests / 0 failures / 0 skipped

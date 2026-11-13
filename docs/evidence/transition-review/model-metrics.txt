@@ -1,0 +1,11 @@
+Approximate Kotlin backend metrics, retaining compressor history on drain. Not native/output-device measurements.
+A2_METRIC AMP(-40.0dBFS): maxDelta=19 (natural=19), peak=328, minRms=108.15729286552988
+A2_METRIC AMP(-18.0dBFS): maxDelta=238 (natural=238), peak=4125, minRms=1358.9455126126286
+A2_METRIC AMP(-6.0dBFS): maxDelta=946 (natural=946), peak=16422, minRms=5409.524141502651
+A2_METRIC AMP(0.0dBFS): maxDelta=1887 (natural=1887), peak=32767, minRms=10515.955562412053
+A2_METRIC RAPID(period=16): legacyFrames=6144, legacyMaxDelta=15399, legacyMinRms=0.0; seamlessFrames=2048, seamlessMaxDelta=628, seamlessMinRms=5583.587318539041, steadyFloorRms=1828.123431623259
+A2_METRIC RAPID(period=32): legacyFrames=4096, legacyMaxDelta=15399, legacyMinRms=0.0; seamlessFrames=2048, seamlessMaxDelta=628, seamlessMinRms=5583.587318539041, steadyFloorRms=1828.123431623259
+A2_METRIC RAPID(period=64): legacyFrames=3072, legacyMaxDelta=15399, legacyMinRms=0.0; seamlessFrames=2048, seamlessMaxDelta=628, seamlessMinRms=4952.476924479305, steadyFloorRms=1828.123431623259
+A2_METRIC RAPID(period=128): legacyFrames=2560, legacyMaxDelta=15399, legacyMinRms=0.0; seamlessFrames=2048, seamlessMaxDelta=628, seamlessMinRms=2205.443861221591, steadyFloorRms=1828.123431623259
+A2_METRIC ON->OFF: legacyBoundaryDelta=12655, legacyMaxDelta=20594; seamlessBoundaryDelta=1382, seamlessMaxDelta=1382, natural=1382
+A2_METRIC OFF->ON: legacy=[maxDelta=17053, minRms=0.0, peak=20000, frames=1088] seamless=[maxDelta=1152, minRms=5589.837088133696, peak=20000, frames=1024]

@@ -15,8 +15,16 @@ $adb = Join-Path $Sdk 'platform-tools/adb.exe'
 $out = [IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 function Invoke-Checked([string]$Program, [string[]]$Arguments) {
-    $lines = & $Program @Arguments 2>&1
-    $code = $LASTEXITCODE
+    $null = Get-Command $Program -ErrorAction Stop
+    $global:LASTEXITCODE = 0
+    $previousErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $lines = & $Program @Arguments 2>&1 | ForEach-Object { "$_" }
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
     if ($code -ne 0) { throw "$Program failed ($code): $lines" }
     return $lines
 }

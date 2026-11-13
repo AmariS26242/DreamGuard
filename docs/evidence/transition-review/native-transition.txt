@@ -1,0 +1,3 @@
+INSTRUMENTATION_RESULT: stream=PASS 100 real JNI cases; worst cold boundary=334 LSB
+
+INSTRUMENTATION_CODE: -1

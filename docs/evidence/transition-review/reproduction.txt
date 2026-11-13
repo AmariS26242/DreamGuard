@@ -1,0 +1,4 @@
+Before production fix, newly added regression failed:
+java.lang.AssertionError: rate=8000 channels=1 frames=1 ch=0 delta=8013
+After production fix: 24 combinations passed the <=500 LSB boundary assertion.
+The native 100-case test uses other signals; its 334 LSB metric is not a direct comparison to this model input.

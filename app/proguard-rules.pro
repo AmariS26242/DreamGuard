@@ -3,3 +3,6 @@
 -keepclasseswithmembernames class com.dreamguard.app.audio.NativeAudioEngine {
     native <methods>;
 }
+-keepclasseswithmembernames class com.dreamguard.app.audio.NativePcmProcessor {
+    native <methods>;
+}

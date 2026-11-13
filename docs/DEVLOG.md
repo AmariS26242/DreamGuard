@@ -10,6 +10,18 @@
 
 ---
 
+## 2026-11-14 — 第 38 轮 Antigravity A1/A2 复核
+
+**任务** 用户提供 Antigravity 无缝切换交接记录，要求审查并上传。审查覆盖其八个已修改文件和未提交的审计草稿，基线为 `acc1d0b`。A1 的 JNI 保留规则、合约测试、CI 宿主 CTest 入口及 PowerShell 退出码处理保留。
+
+**发现与修正** A2 的短冷启动尾部淡出可能在进入原字节直通前沿用错误增益。新增反例在修前失败：8 kHz、mono、处理 1 帧，边界差 8013 LSB。已改为依据实际 drain 尾部更新剩余淡出增益，24 种组合通过。测试模型的 drain 不再错误地重置压缩历史；纠正审计草稿中不存在的生产 Kotlin 压缩回退、遗漏通知权限申请、绝对零分配和所有情况下 1:1 等错误描述。
+
+**验证** 全量 JVM 152/0/0，LocalAudioProcessor 31 项；Debug/Release 三 ABI 构建成功。新增只在 Debug 的 `AudioTransitionCheck`：API 35 x86_64 上真实 Kotlin/JNI/native 100 组信号检查通过，短冷启动边界最大 334 LSB。该数字与模型修前反例不是同条件比较。九组原生可执行测试全部通过，300 行核心基准运行成功。APK manifest 已检查：Debug 有检查入口，Release 没有。GitHub CI 的本次运行结果以提交关联的 Actions 为准。
+
+**范围与证据** 原生 compressor/limiter/PCM16 算法未改，DG-040 与 Part 4 实施任务仍为 TODO。冷启动保留一次 64 帧延迟，中途往返不累计；稳态直通原字节一致，过渡干湿混合不具有全湿声的峰值上界。不把模型指标或内存信号检查当作实际出声和听感。真机短测与长测沿用原安排。[复核报告](AUDIT_REPORT.md)，[原始证据](evidence/transition-review/README.md)。
+
+---
+
 ## 2026-11-12 — 第 37 轮 Part 4 执行计划
 
 **任务** 按用户要求制定 Part 4，映射现有 Phase 4“响度匹配与自然听感”。基线为第 36 轮完成后的 `90dc5c3`。

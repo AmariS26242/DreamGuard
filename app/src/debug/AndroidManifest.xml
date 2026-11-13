@@ -6,6 +6,12 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
+    <!-- ADB-only verification entry point; absent from release builds. -->
+    <instrumentation
+        android:name=".debug.AudioTransitionCheck"
+        android:targetPackage="${applicationId}"
+        android:functionalTest="true" />
+
     <application>
         <!-- Exported only in the debug source set so `adb shell am start -n`
              can open the probe. The Activity itself still requires a visible

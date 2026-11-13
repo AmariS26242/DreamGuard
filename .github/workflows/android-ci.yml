@@ -46,6 +46,9 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Run native DSP core tests
+        run: bash ./gradlew --no-daemon --stacktrace :dsp-core:dspCoreTest
+
       - name: Run JVM unit tests
         run: bash ./gradlew --no-daemon --stacktrace testDebugUnitTest
 

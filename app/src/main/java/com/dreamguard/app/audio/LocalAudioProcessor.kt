@@ -5,6 +5,11 @@ import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.BaseAudioProcessor
 import androidx.media3.common.util.UnstableApi
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * The PCM stage on the Media3 playback path for **local** files, now backed by
@@ -25,17 +30,22 @@ import java.nio.ByteBuffer
  *    quiet material while loud peaks are reduced further. That is why the switch
  *    is labelled "本地压缩" instead of "−6 dB": the audible contract changed from
  *    a constant gain to a level-dependent one, and the floor is unchanged.
- *  - Processing off (bypass): bytes are copied verbatim, so the output is
- *    bit-identical even for a partial frame or an odd trailing byte.
+ *  - Steady bypass copies bytes verbatim, including partial frames/odd bytes.
+ *    Switching off first emits the retained tail and a bounded fade to dry.
  *  - Any native failure (library missing, handle creation failure, non-direct
  *    buffer, conversion error) also falls back to that byte-exact copy and sets
  *    [nativeState] / [nativeError] so the UI can explain what happened. Local
  *    playback must never go silent because of a DSP problem.
  *
  * The guard follows compression, has a -1 dBFS ceiling and retains 64 frames.
- * At EOS and before bypass the tail is emitted once. Each processed segment
- * adds 64 silent startup frames (1.333 ms at 48 kHz); seeks discard old state.
- * Gain changes may still be audible; physical listening is pending. The
+ * At EOS and before bypass the tail is emitted once. A cold processed stream
+ * retains one 64-frame startup delay (1.333 ms at 48 kHz); after bypass has
+ * emitted, later toggles strip unfilled startup zeros instead of adding delay.
+ * The fade blends aligned dry/wet samples over 64 frames. Dry contributions
+ * may exceed the DSP ceiling, as does ordinary bypass. Only fully wet output
+ * has the native peak bound. Envelope weights are continuous on reversal;
+ * first-derivative continuity and audible transparency are not guaranteed.
+ * Physical listening is pending. The
  * generative soundscape uses a separate handle and is unaffected by this stage.
  *
  * Threading and handles: [queueInput], [onConfigure], [onFlush] and [onReset]
@@ -122,6 +132,21 @@ class LocalAudioProcessor internal constructor(
     // the end of the preceding processed block before its byte-exact bypass.
     private var nativeTailPending = false
 
+    // Transition coordination state (accessed exclusively on the playback thread).
+    // Transition workspaces are pre-allocated. BaseAudioProcessor may allocate
+    // its output buffer at first use or when a larger block arrives.
+    private val drainScratch: ByteBuffer =
+        ByteBuffer.allocateDirect(MAX_DRAIN_BYTES).order(ByteOrder.nativeOrder())
+    private val inputLookaheadRing = ShortArray(LOOKAHEAD_FRAMES * MAX_NATIVE_CHANNELS)
+    private val lastChannelGain = FloatArray(MAX_NATIVE_CHANNELS) { DEFAULT_PROCESSED_GAIN }
+    private val fadeOutStartGain = FloatArray(MAX_NATIVE_CHANNELS) { DEFAULT_PROCESSED_GAIN }
+    private var ringWritePos = 0
+    private var primedFrames = 0
+    private var hasEmittedBypassFrames = false
+    private var suppressStartupDelay = false
+    private var wasProcessingActive = false
+    private var wetStep = 0
+
     /** Whether the negotiated layout is one the compressor supports (1–2 ch). */
     @Volatile
     private var nativeLayout: Boolean = false
@@ -199,12 +224,10 @@ class LocalAudioProcessor internal constructor(
         val output = replaceOutputBuffer(remaining + MAX_DRAIN_BYTES)
         val inputPosition = inputBuffer.position()
         val outputPosition = output.position()
+        val enabled = processingEnabled
 
-        if (!processingEnabled) {
-            output.position(drainNative(output))
-            // Bit-exact bypass: copy every byte, including a possible odd tail.
-            output.put(inputBuffer)
-            output.flip()
+        if (!enabled) {
+            handleBypassBlock(inputBuffer, inputPosition, remaining, output, outputPosition)
             nativeState = if (rejectedFormat != null) {
                 NativeState.UNSUPPORTED_FORMAT
             } else {
@@ -230,9 +253,16 @@ class LocalAudioProcessor internal constructor(
                 -1
             }
             if (written == remaining) {
+                val outEnd = coordinateActiveBlock(
+                    inputBuffer,
+                    inputPosition,
+                    remaining,
+                    output,
+                    outputPosition,
+                )
                 nativeTailPending = true
                 inputBuffer.position(inputPosition + remaining)
-                output.position(outputPosition + written)
+                output.position(outEnd)
                 output.flip()
                 nativeState = NativeState.ACTIVE
                 return
@@ -254,6 +284,9 @@ class LocalAudioProcessor internal constructor(
 
         // Safe fallback: identical bytes, no matter why the native path is gone.
         nativeTailPending = false
+        val activeFormat = nativeFormat ?: acceptedFormat
+        val fallbackFrameBytes = (activeFormat?.channelCount ?: 1) * 2
+        resetTransitionState(bypassEmitted = remaining >= fallbackFrameBytes)
         output.put(inputBuffer)
         output.flip()
         nativeState = if (nativeError != null) NativeState.ERROR else enabledState()
@@ -266,16 +299,270 @@ class LocalAudioProcessor internal constructor(
     override fun onQueueEndOfStream() {
         if (!nativeTailPending) return
         val output = replaceOutputBuffer(MAX_DRAIN_BYTES)
-        output.position(drainNative(output))
+        val outEnd = emitDrainedTail(output, output.position(), fadeToBypass = false)
+        output.position(outEnd)
         output.flip()
     }
 
-    private fun drainNative(output: ByteBuffer): Int {
+    private fun handleBypassBlock(
+        inputBuffer: ByteBuffer,
+        inputPosition: Int,
+        remaining: Int,
+        output: ByteBuffer,
+        outputPosition: Int,
+    ) {
+        val channels = ((nativeFormat ?: acceptedFormat)?.channelCount ?: 1)
+            .coerceIn(MIN_NATIVE_CHANNELS, MAX_NATIVE_CHANNELS)
+        val frameBytes = channels * 2
+        if (wasProcessingActive) {
+            wasProcessingActive = false
+            for (ch in 0 until channels) {
+                fadeOutStartGain[ch] = lastChannelGain[ch]
+            }
+        }
+
+        var outOffset = emitDrainedTail(output, outputPosition, fadeToBypass = true)
+
+        val totalFrames = remaining / frameBytes
+        if (totalFrames > 0) {
+            hasEmittedBypassFrames = true
+        }
+        var frameIdx = 0
+        while (wetStep > 0 && frameIdx < totalFrames) {
+            wetStep--
+            val alpha = WET_GAIN_TABLE[wetStep]
+            val inFrameOffset = inputPosition + frameIdx * frameBytes
+            for (ch in 0 until channels) {
+                val dry = readPcm16(inputBuffer, inFrameOffset + ch * 2)
+                val gain = (1.0f - alpha) + alpha * fadeOutStartGain[ch]
+                val smoothed = clampPcm16((dry.toFloat() * gain).roundToInt())
+                writePcm16(output, outOffset + ch * 2, smoothed)
+            }
+            outOffset += frameBytes
+            frameIdx++
+        }
+
+        inputBuffer.position(inputPosition + frameIdx * frameBytes)
+        output.position(outOffset)
+        if (inputBuffer.hasRemaining()) {
+            // Bit-exact bypass for all remaining frames and any odd trailing byte.
+            output.put(inputBuffer)
+        }
+        output.flip()
+    }
+
+    private fun coordinateActiveBlock(
+        inputBuffer: ByteBuffer,
+        inputPosition: Int,
+        remaining: Int,
+        output: ByteBuffer,
+        outputPosition: Int,
+    ): Int {
+        val channels = (nativeFormat?.channelCount ?: 1)
+            .coerceIn(MIN_NATIVE_CHANNELS, MAX_NATIVE_CHANNELS)
+        val frameBytes = channels * 2
+        val latency = min(compressor.latencyFrames, LOOKAHEAD_FRAMES)
+        val totalFrames = remaining / frameBytes
+        val tailBytes = remaining - totalFrames * frameBytes
+
+        if (!wasProcessingActive) {
+            wasProcessingActive = true
+            if (!hasEmittedBypassFrames && !nativeTailPending) {
+                // Cold-start processed stream: preserve initial lookahead behavior and unity wet weight.
+                suppressStartupDelay = false
+                wetStep = TRANSITION_FRAMES
+            } else if (!nativeTailPending && primedFrames == 0) {
+                // Mid-stream OFF -> ON toggle: strip unfilled limiter zeros and ramp in smoothly.
+                suppressStartupDelay = true
+            }
+        }
+
+        if (latency == 0 && wetStep == TRANSITION_FRAMES) {
+            updateGainTrackerDirect(inputBuffer, inputPosition, output, outputPosition, totalFrames, channels, frameBytes)
+            return outputPosition + remaining
+        }
+
+        var writtenFrames = 0
+        for (frameIdx in 0 until totalFrames) {
+            val inByteOffset = inputPosition + frameIdx * frameBytes
+            val wetByteOffset = outputPosition + frameIdx * frameBytes
+            val outByteOffset = outputPosition + writtenFrames * frameBytes
+
+            if (latency > 0 && primedFrames < latency) {
+                val ringBase = ringWritePos * channels
+                for (ch in 0 until channels) {
+                    inputLookaheadRing[ringBase + ch] = readPcm16(inputBuffer, inByteOffset + ch * 2)
+                }
+                ringWritePos = (ringWritePos + 1) % latency
+                primedFrames++
+                if (!suppressStartupDelay) {
+                    writtenFrames++
+                }
+                continue
+            }
+
+            if (wetStep < TRANSITION_FRAMES) {
+                wetStep++
+            }
+            val alpha = WET_GAIN_TABLE[wetStep]
+            val ringBase = ringWritePos * channels
+            val needWrite = alpha < 1.0f || outByteOffset != wetByteOffset
+
+            for (ch in 0 until channels) {
+                val currentDry = readPcm16(inputBuffer, inByteOffset + ch * 2)
+                val alignedDry = if (latency > 0) {
+                    val delayed = inputLookaheadRing[ringBase + ch]
+                    inputLookaheadRing[ringBase + ch] = currentDry
+                    delayed
+                } else {
+                    currentDry
+                }
+                val wetSample = readPcm16(output, wetByteOffset + ch * 2)
+                val dryAbs = abs(alignedDry.toInt())
+                if (dryAbs >= GAIN_TRACK_MIN_SAMPLE) {
+                    lastChannelGain[ch] =
+                        (wetSample.toFloat() / alignedDry.toFloat()).coerceIn(0.0f, 1.0f)
+                }
+                if (needWrite) {
+                    val sample = if (alpha >= 1.0f) wetSample else blendSamples(alignedDry, wetSample, alpha)
+                    writePcm16(output, outByteOffset + ch * 2, sample)
+                }
+            }
+            if (latency > 0) {
+                ringWritePos = (ringWritePos + 1) % latency
+            }
+            writtenFrames++
+        }
+
+        val outBytes = writtenFrames * frameBytes + tailBytes
+        if (tailBytes > 0 && outBytes != remaining) {
+            val srcTailStart = outputPosition + totalFrames * frameBytes
+            val dstTailStart = outputPosition + writtenFrames * frameBytes
+            for (i in 0 until tailBytes) {
+                output.put(dstTailStart + i, output.get(srcTailStart + i))
+            }
+        }
+        return outputPosition + outBytes
+    }
+
+    private fun updateGainTrackerDirect(
+        inputBuffer: ByteBuffer,
+        inputPosition: Int,
+        output: ByteBuffer,
+        outputPosition: Int,
+        totalFrames: Int,
+        channels: Int,
+        frameBytes: Int,
+    ) {
+        if (totalFrames <= 0) return
+        val startFrame = maxOf(0, totalFrames - GAIN_TRACK_TAIL_FRAMES)
+        for (frameIdx in startFrame until totalFrames) {
+            val inOffset = inputPosition + frameIdx * frameBytes
+            val wetOffset = outputPosition + frameIdx * frameBytes
+            for (ch in 0 until channels) {
+                val dry = readPcm16(inputBuffer, inOffset + ch * 2)
+                if (abs(dry.toInt()) >= GAIN_TRACK_MIN_SAMPLE) {
+                    val wet = readPcm16(output, wetOffset + ch * 2)
+                    lastChannelGain[ch] = (wet.toFloat() / dry.toFloat()).coerceIn(0.0f, 1.0f)
+                }
+            }
+        }
+    }
+
+    private fun emitDrainedTail(
+        output: ByteBuffer,
+        outputPosition: Int,
+        fadeToBypass: Boolean,
+    ): Int {
+        val drainedBytes = drainNativeToScratch()
+        if (drainedBytes <= 0) {
+            if (fadeToBypass) {
+                primedFrames = 0
+                ringWritePos = 0
+                suppressStartupDelay = false
+            }
+            return outputPosition
+        }
+
+        val channels = (nativeFormat?.channelCount ?: 1)
+            .coerceIn(MIN_NATIVE_CHANNELS, MAX_NATIVE_CHANNELS)
+        val frameBytes = channels * 2
+        val latency = min(compressor.latencyFrames, LOOKAHEAD_FRAMES)
+        var outOffset = outputPosition
+
+        if (latency <= 0) {
+            // Latency-free backends (or synthetic contract drains): preserve drained bytes verbatim.
+            for (i in 0 until drainedBytes) {
+                output.put(outOffset + i, drainScratch.get(i))
+            }
+            outOffset += drainedBytes
+        } else {
+            val totalDrainedFrames = drainedBytes / frameBytes
+            val availableReal = min(totalDrainedFrames, primedFrames)
+            val skipFrames = totalDrainedFrames - availableReal
+            val ringReadStart = (ringWritePos - availableReal + latency) % latency
+
+            if (!suppressStartupDelay && skipFrames > 0) {
+                // Cold-start EOS or cold-start early toggle: keep unfilled startup frames.
+                val skipBytes = skipFrames * frameBytes
+                for (i in 0 until skipBytes) {
+                    output.put(outOffset + i, drainScratch.get(i))
+                }
+                outOffset += skipBytes
+            }
+
+            for (k in 0 until availableReal) {
+                val drainByteOffset = (skipFrames + k) * frameBytes
+                val ringFrame = (ringReadStart + k) % latency
+                if (fadeToBypass) {
+                    if (wetStep > 0) {
+                        wetStep--
+                    }
+                } else if (suppressStartupDelay) {
+                    if (wetStep < TRANSITION_FRAMES) {
+                        wetStep++
+                    }
+                }
+                val alpha = WET_GAIN_TABLE[wetStep]
+                for (ch in 0 until channels) {
+                    val wetSample = readPcm16(drainScratch, drainByteOffset + ch * 2)
+                    val drySample = inputLookaheadRing[ringFrame * channels + ch]
+                    // A short cold stream can finish draining before its fade
+                    // reaches dry. Continue from the gain of the actual last
+                    // tail sample, not the default/stale pre-drain estimate.
+                    if (fadeToBypass && abs(drySample.toInt()) >= GAIN_TRACK_MIN_SAMPLE) {
+                        fadeOutStartGain[ch] =
+                            (wetSample.toFloat() / drySample.toFloat()).coerceIn(0.0f, 1.0f)
+                    }
+                    val sample = if (alpha >= 1.0f) {
+                        wetSample
+                    } else if (alpha <= 0.0f) {
+                        drySample
+                    } else {
+                        blendSamples(drySample, wetSample, alpha)
+                    }
+                    writePcm16(output, outOffset + ch * 2, sample)
+                }
+                outOffset += frameBytes
+            }
+            if (fadeToBypass && availableReal > 0) {
+                hasEmittedBypassFrames = true
+            }
+        }
+
+        primedFrames = 0
+        ringWritePos = 0
+        suppressStartupDelay = false
+        return outOffset
+    }
+
+    private fun drainNativeToScratch(): Int {
         if (!nativeTailPending) return 0
         nativeTailPending = false
         if (nativeHandle == 0L || nativeError != null) return 0
+        drainScratch.clear()
         val written = try {
-            compressor.drain(nativeHandle, output, 0)
+            compressor.drain(nativeHandle, drainScratch, 0)
         } catch (error: Throwable) {
             nativeError = "native drain threw ${error.javaClass.simpleName}"
             nativeState = NativeState.ERROR
@@ -290,8 +577,22 @@ class LocalAudioProcessor internal constructor(
         return written
     }
 
+    private fun resetTransitionState(bypassEmitted: Boolean = false) {
+        ringWritePos = 0
+        primedFrames = 0
+        hasEmittedBypassFrames = bypassEmitted
+        suppressStartupDelay = false
+        wasProcessingActive = false
+        wetStep = 0
+        for (ch in 0 until MAX_NATIVE_CHANNELS) {
+            lastChannelGain[ch] = DEFAULT_PROCESSED_GAIN
+            fadeOutStartGain[ch] = DEFAULT_PROCESSED_GAIN
+        }
+    }
+
     override fun onFlush() {
         nativeTailPending = false
+        resetTransitionState()
         if (released) {
             // A sink that resets its processors after the owner released the player
             // must not resurrect a native handle that nothing will use or free.
@@ -384,6 +685,7 @@ class LocalAudioProcessor internal constructor(
 
     private fun closeNative() {
         nativeTailPending = false
+        resetTransitionState()
         val handle = nativeHandle
         nativeHandle = 0L
         nativeFormat = null
@@ -415,9 +717,48 @@ class LocalAudioProcessor internal constructor(
 
         private const val MIN_NATIVE_CHANNELS = 1
         private const val MAX_NATIVE_CHANNELS = 2
-        private const val MAX_DRAIN_BYTES = 64 * MAX_NATIVE_CHANNELS * 2
+        private const val LOOKAHEAD_FRAMES = 64
+        private const val TRANSITION_FRAMES = 64
+        private const val MAX_DRAIN_BYTES = LOOKAHEAD_FRAMES * MAX_NATIVE_CHANNELS * 2
+        private const val DEFAULT_PROCESSED_GAIN = 0.5f
+        private const val GAIN_TRACK_MIN_SAMPLE = 8
+        private const val GAIN_TRACK_TAIL_FRAMES = 8
+        private val WET_GAIN_TABLE = FloatArray(TRANSITION_FRAMES + 1) { step ->
+            (0.5 * (1.0 - cos(Math.PI * step / TRANSITION_FRAMES))).toFloat()
+        }
     }
 }
+
+private val IS_LITTLE_ENDIAN = ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN
+
+private fun readPcm16(buffer: ByteBuffer, byteOffset: Int): Short {
+    val b0 = buffer.get(byteOffset).toInt() and 0xFF
+    val b1 = buffer.get(byteOffset + 1).toInt() and 0xFF
+    return if (IS_LITTLE_ENDIAN) {
+        ((b1 shl 8) or b0).toShort()
+    } else {
+        ((b0 shl 8) or b1).toShort()
+    }
+}
+
+private fun writePcm16(buffer: ByteBuffer, byteOffset: Int, value: Short) {
+    val bits = value.toInt()
+    if (IS_LITTLE_ENDIAN) {
+        buffer.put(byteOffset, (bits and 0xFF).toByte())
+        buffer.put(byteOffset + 1, ((bits ushr 8) and 0xFF).toByte())
+    } else {
+        buffer.put(byteOffset, ((bits ushr 8) and 0xFF).toByte())
+        buffer.put(byteOffset + 1, (bits and 0xFF).toByte())
+    }
+}
+
+private fun blendSamples(dry: Short, wet: Short, alpha: Float): Short {
+    val value = dry.toFloat() * (1.0f - alpha) + wet.toFloat() * alpha
+    return clampPcm16(value.roundToInt())
+}
+
+private fun clampPcm16(value: Int): Short =
+    value.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
 
 private fun AudioProcessor.AudioFormat.isSupportedPcm16(): Boolean =
     encoding == C.ENCODING_PCM_16BIT && channelCount > 0 && sampleRate > 0

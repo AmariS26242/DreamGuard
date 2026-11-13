@@ -1,0 +1,7 @@
+:app:testDebugUnitTest :app:assembleDebug :app:assembleRelease => BUILD SUCCESSFUL
+Debug/Release: arm64-v8a, armeabi-v7a, x86_64
+Test model drain corrected afterwards; :app:testDebugUnitTest rerun => 152/0/0
+Only comments changed in production after APK build; functional production code and instrumentation match.
+app-debug.apk SHA256=36ef0e4bdf4721490c937f43b866b07df66078a7ef8cb733cb159c32a4b29c57
+app-release-unsigned.apk SHA256=76a4fffb737caf539e838afda23cb646bc3d9129e4acb17d51b5fc2b9fb3f261
+APK manifests checked: AudioTransitionCheck present in Debug, absent from Release.
