@@ -116,15 +116,28 @@ class NativeAudioEngineTest {
     @Test
     fun `controller observes an asynchronous engine failure`() {
         val dsp = FakeDsp()
-        val outputs = FakeOutputs(blocking = false, failCode = -5)
+        val allowFailure = CountDownLatch(1)
+        val observedFailure = CountDownLatch(1)
+        val outputs = FakeOutputs(blocking = false, failCode = -5, failureGate = allowFailure)
         val controller = PlaybackController(NativeAudioEngine(dsp, outputs))
-        assertTrue(controller.start())
-
-        awaitUntil("controller mirrors the engine failure") { !controller.isRunning }
-        assertTrue(controller.lastError!!.contains("Audio output rejected"))
-        assertFalse(controller.isRunning)
-
-        controller.release()
+        controller.listener = {
+            if (!controller.isRunning && controller.lastError?.contains("Audio output rejected") == true) {
+                observedFailure.countDown()
+            }
+        }
+        try {
+            // The test is about a failure AFTER a successful start. Hold the
+            // failing write until start has returned, independent of scheduling.
+            assertTrue(controller.start())
+            assertTrue(outputs.opened.single().enteredWrite.await(2, TimeUnit.SECONDS))
+            allowFailure.countDown()
+            assertTrue("controller did not report the asynchronous failure", observedFailure.await(2, TimeUnit.SECONDS))
+            assertTrue(controller.lastError!!.contains("Audio output rejected"))
+            assertFalse(controller.isRunning)
+        } finally {
+            allowFailure.countDown()
+            controller.release()
+        }
     }
 
     @Test
@@ -395,6 +408,7 @@ class NativeAudioEngineTest {
     private class FakeOutputs(
         private val blocking: Boolean,
         @Volatile var failCode: Int = Int.MIN_VALUE,
+        private val failureGate: CountDownLatch? = null,
     ) : RenderOutputFactory {
         val opened = CopyOnWriteArrayList<FakeOutput>()
 
@@ -405,13 +419,14 @@ class NativeAudioEngineTest {
 
         override fun open(sampleRate: Int, channels: Int): RenderOutput? {
             if (openFails) return null
-            return FakeOutput(blocking, failCode).also { opened += it }
+            return FakeOutput(blocking, failCode, failureGate).also { opened += it }
         }
     }
 
     private class FakeOutput(
         private val blocking: Boolean,
         @Volatile private var failCode: Int,
+        private val failureGate: CountDownLatch? = null,
     ) : RenderOutput {
         val enteredWrite = CountDownLatch(1)
         val gate = CountDownLatch(1)
@@ -428,7 +443,10 @@ class NativeAudioEngineTest {
         override fun write(buffer: FloatArray, offset: Int, size: Int): Int {
             writeCount.incrementAndGet()
             enteredWrite.countDown()
-            if (failCode != Int.MIN_VALUE) return failCode
+            if (failCode != Int.MIN_VALUE) {
+                failureGate?.await()
+                return failCode
+            }
             if (blocking) gate.await(10, TimeUnit.SECONDS)
             return size
         }

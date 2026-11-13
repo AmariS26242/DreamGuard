@@ -20,6 +20,8 @@
 
 **范围与证据** 原生 compressor/limiter/PCM16 算法未改，DG-040 与 Part 4 实施任务仍为 TODO。冷启动保留一次 64 帧延迟，中途往返不累计；稳态直通原字节一致，过渡干湿混合不具有全湿声的峰值上界。不把模型指标或内存信号检查当作实际出声和听感。真机短测与长测沿用原安排。[复核报告](AUDIT_REPORT.md)，[原始证据](evidence/transition-review/README.md)。
 
+**远端复核补充** 首次推送 `24b2c7e` 的 Linux 原生 CTest 已通过，JVM 在既有 `NativeAudioEngineTest.controller observes an asynchronous engine failure` 暴露调度竞态：失败线程可能先于 start 返回，测试仍要求成功。已将失败动作放在显式门闩后，并等待控制器失败回调；未放宽断言、未修改产品线程行为。后续提交保留该测试修正及原始失败信息。
+
 ---
 
 ## 2026-11-12 — 第 37 轮 Part 4 执行计划

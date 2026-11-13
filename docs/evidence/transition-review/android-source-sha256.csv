@@ -4,3 +4,4 @@ app/src/main/java/com/dreamguard/app/audio/PcmCompressor.kt,cbd723871549eba1f75d
 app/src/debug/java/com/dreamguard/app/debug/AudioTransitionCheck.kt,fe6cf390c1457c2cfc5dc3055b772b3d2687372f66520d807bb4c5350742cc14
 app/src/debug/AndroidManifest.xml,e6df6ea19ca306cf4b2dcbebc09cb14ac13ce3fcca90c8240f17ae7b702cdc77
 app/src/test/java/com/dreamguard/app/audio/LocalAudioProcessorTest.kt,6f32bd8a93553067b003d6654185ba0e6b1ed4bcedc838a1783469cc344ed64e
+app/src/test/java/com/dreamguard/app/audio/NativeAudioEngineTest.kt,51d88ec5698f78232ae3a4f9a1cbb023a15266deda63531e889247111c9028cd

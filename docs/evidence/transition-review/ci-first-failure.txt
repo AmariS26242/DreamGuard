@@ -1,0 +1,8 @@
+Run: https://github.com/AmariS26242/DreamGuard/actions/runs/43460572146
+Commit: 24b2c7ea32fbaeac79469790df1d57c7be953e4e
+Native host CTest: success
+JVM: 152 tests completed, 1 failed
+NativeAudioEngineTest > controller observes an asynchronous engine failure
+java.lang.AssertionError at NativeAudioEngineTest.kt:121 (assertTrue(controller.start()))
+Fix: gate the failing render write until successful start is observed, then wait for the error callback.
+Production controller behavior and error assertions unchanged.
