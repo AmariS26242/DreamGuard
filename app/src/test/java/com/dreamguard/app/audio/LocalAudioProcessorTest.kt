@@ -102,6 +102,9 @@ class LocalAudioProcessorTest {
         var drainCalls = 0
         var throwDrain = false
         var requireDirectInput = false
+        var snapshotCalls = 0
+        var failSnapshot = false
+        var nextSnapshot: DoubleArray? = null
         var lastHandle = 0L
         var lastInputLength = 0
         private var nextHandle = 1L
@@ -156,6 +159,24 @@ class LocalAudioProcessorTest {
                 repeat(drainResult) { output.put(outputOffset + it, 0x42.toByte()) }
             }
             return drainResult
+        }
+
+        override fun snapshot(handle: Long, outValues: DoubleArray): Int {
+            snapshotCalls++
+            if (failSnapshot) return NativePcmProcessor.ERROR_DSP
+            val custom = nextSnapshot
+            if (custom != null) {
+                custom.copyInto(outValues, endIndex = min(outValues.size, custom.size))
+                return 0
+            }
+            outValues.fill(0.0)
+            outValues[NativePcmProcessor.IDX_INPUT_MOMENTARY_LUFS] = Double.NEGATIVE_INFINITY
+            outValues[NativePcmProcessor.IDX_INPUT_SHORT_TERM_LUFS] = Double.NEGATIVE_INFINITY
+            outValues[NativePcmProcessor.IDX_OUTPUT_MOMENTARY_LUFS] = Double.NEGATIVE_INFINITY
+            outValues[NativePcmProcessor.IDX_OUTPUT_SHORT_TERM_LUFS] = Double.NEGATIVE_INFINITY
+            outValues[NativePcmProcessor.IDX_MAKEUP_GAIN_DB] = -6.0206
+            outValues[NativePcmProcessor.IDX_LIMITER_ENABLED] = 1.0
+            return 0
         }
 
         override fun destroy(handle: Long) {
@@ -1230,5 +1251,250 @@ class LocalAudioProcessorTest {
                 }
             }
         }
+    }
+
+    @Test
+    fun `bad snapshot counters never interrupt playback and failed reads stay throttled`() {
+        for (badCounter in doubleArrayOf(Double.NaN, Double.POSITIVE_INFINITY)) {
+            val fake = FakeCompressor().apply {
+                nextSnapshot = DoubleArray(NativePcmProcessor.SNAPSHOT_FIELD_COUNT).apply {
+                    this[NativePcmProcessor.IDX_COMPLETED_HOPS] = badCounter
+                }
+            }
+            val processor = configured(LocalAudioProcessor(fake)).apply { setProcessingEnabled(true) }
+            try {
+                repeat(100) {
+                    processor.queueInput(samples(*ShortArray(960 * 2) { 1000 }))
+                    processor.output
+                }
+                assertEquals(LocalAudioProcessor.NativeState.ACTIVE, processor.nativeState)
+                assertNull(processor.nativeFailure)
+                assertFalse(processor.loudnessSnapshot.statusLabel().contains("实时观测"))
+                assertTrue("bad packets retried ${fake.snapshotCalls} times", fake.snapshotCalls <= 12)
+            } finally { processor.close() }
+        }
+    }
+
+    @Test
+    fun `snapshot transport failure clears old readings without per-block retries`() {
+        val fake = FakeCompressor().apply {
+            nextSnapshot = DoubleArray(NativePcmProcessor.SNAPSHOT_FIELD_COUNT).apply {
+                this[NativePcmProcessor.IDX_INPUT_MOMENTARY_LUFS] = -18.0
+                this[NativePcmProcessor.IDX_INPUT_MOMENTARY_READY] = 1.0
+                this[NativePcmProcessor.IDX_COMPLETED_HOPS] = 4.0
+            }
+        }
+        val processor = configured(LocalAudioProcessor(fake)).apply { setProcessingEnabled(true) }
+        try {
+            processor.queueInput(samples(*ShortArray(960 * 2) { 1000 }))
+            processor.output
+            assertEquals("-18.0 LUFS", processor.loudnessSnapshot.inputMomentaryLabel())
+            fake.failSnapshot = true
+            val before = fake.snapshotCalls
+            repeat(100) {
+                processor.queueInput(samples(*ShortArray(960 * 2) { 1000 }))
+                processor.output
+            }
+            assertTrue("failed snapshots retried every block", fake.snapshotCalls - before <= 12)
+            assertFalse("stale value still displayed", processor.loudnessSnapshot.inputMomentaryLabel().contains("-18.0"))
+            assertEquals(LocalAudioProcessor.NativeState.ACTIVE, processor.nativeState)
+            fake.failSnapshot = false
+            repeat(13) {
+                processor.queueInput(samples(*ShortArray(960 * 2) { 1000 }))
+                processor.output
+            }
+            assertEquals("-18.0 LUFS", processor.loudnessSnapshot.inputMomentaryLabel())
+        } finally { processor.close() }
+    }
+
+    @Test
+    fun `observation readiness attempts follow rounded native hops at 11025 Hz`() {
+        val fake = FakeCompressor()
+        val processor = configured(LocalAudioProcessor(fake), sampleRate = 11025, channelCount = 1)
+        processor.setProcessingEnabled(true)
+        try {
+            repeat(4411) {
+                processor.queueInput(samples(1000))
+                processor.output
+            }
+            assertEquals("window queried before four rounded hops", 2, fake.snapshotCalls)
+            processor.queueInput(samples(1000))
+            processor.output
+            assertEquals(3, fake.snapshotCalls)
+        } finally { processor.close() }
+    }
+
+    @Test
+    fun `loudness snapshot unready and silence never format as zero LUFS`() {
+        val bypass = LocalAudioProcessor.LoudnessSnapshot()
+        assertEquals(LocalAudioProcessor.ObservationState.BYPASS, bypass.state)
+        assertEquals("直通", bypass.inputShortTermLabel())
+        assertEquals("直通", bypass.outputShortTermLabel())
+        assertFalse(bypass.statusLabel().contains("0 LUFS"))
+
+        val fake = FakeCompressor().apply {
+            nextSnapshot = DoubleArray(NativePcmProcessor.SNAPSHOT_FIELD_COUNT).apply {
+                this[NativePcmProcessor.IDX_INPUT_MOMENTARY_LUFS] = 0.0
+                this[NativePcmProcessor.IDX_INPUT_SHORT_TERM_LUFS] = 0.0
+                this[NativePcmProcessor.IDX_OUTPUT_MOMENTARY_LUFS] = 0.0
+                this[NativePcmProcessor.IDX_OUTPUT_SHORT_TERM_LUFS] = 0.0
+                this[NativePcmProcessor.IDX_MAKEUP_GAIN_DB] = -6.0206
+                this[NativePcmProcessor.IDX_LIMITER_ENABLED] = 1.0
+            }
+        }
+        val processor = configured(LocalAudioProcessor(fake)).apply { setProcessingEnabled(true) }
+        val block = ShortArray(960 * 2) { 1000 }
+        processor.queueInput(samples(*block))
+        processor.output
+
+        val observing = processor.loudnessSnapshot
+        assertEquals(LocalAudioProcessor.ObservationState.OBSERVING, observing.state)
+        assertFalse(observing.inputMomentaryReady)
+        assertFalse(observing.inputShortTermReady)
+        assertEquals("观测中", observing.inputMomentaryLabel())
+        assertEquals("观测中", observing.inputShortTermLabel())
+        assertEquals("观测中", observing.outputShortTermLabel())
+
+        // Silence (-Inf) with ready=1 -> SILENT_OR_LOW_LEVEL, never "0 LUFS".
+        fake.nextSnapshot = DoubleArray(NativePcmProcessor.SNAPSHOT_FIELD_COUNT).apply {
+            this[NativePcmProcessor.IDX_INPUT_MOMENTARY_LUFS] = Double.NEGATIVE_INFINITY
+            this[NativePcmProcessor.IDX_INPUT_SHORT_TERM_LUFS] = Double.NEGATIVE_INFINITY
+            this[NativePcmProcessor.IDX_OUTPUT_MOMENTARY_LUFS] = Double.NEGATIVE_INFINITY
+            this[NativePcmProcessor.IDX_OUTPUT_SHORT_TERM_LUFS] = Double.NEGATIVE_INFINITY
+            this[NativePcmProcessor.IDX_INPUT_MOMENTARY_READY] = 1.0
+            this[NativePcmProcessor.IDX_INPUT_SHORT_TERM_READY] = 1.0
+            this[NativePcmProcessor.IDX_OUTPUT_MOMENTARY_READY] = 1.0
+            this[NativePcmProcessor.IDX_OUTPUT_SHORT_TERM_READY] = 1.0
+            this[NativePcmProcessor.IDX_LIMITER_ENABLED] = 1.0
+        }
+        processor.configure(pcmFormat())
+        processor.flush()
+        processor.queueInput(samples(*block))
+        processor.output
+        val silence = processor.loudnessSnapshot
+        assertEquals(LocalAudioProcessor.ObservationState.SILENT_OR_LOW_LEVEL, silence.state)
+        assertEquals("静音", silence.inputShortTermLabel())
+        assertEquals("静音", silence.outputShortTermLabel())
+
+        // Low level (-68.5 <= -60.0) & NaN defense.
+        val lowLevel = LocalAudioProcessor.LoudnessSnapshot(
+            state = LocalAudioProcessor.ObservationState.SILENT_OR_LOW_LEVEL,
+            inputShortTermLufs = -68.5,
+            outputShortTermLufs = Double.NaN,
+            inputShortTermReady = true,
+            outputShortTermReady = true,
+            limiterEnabled = true,
+        )
+        assertTrue(lowLevel.inputShortTermLabel().contains("-60"))
+        assertEquals("观测无效", lowLevel.outputShortTermLabel())
+        processor.close()
+    }
+
+    @Test
+    fun `loudness snapshot publishes dual observation points and limiter state`() {
+        val fake = FakeCompressor().apply {
+            nextSnapshot = DoubleArray(NativePcmProcessor.SNAPSHOT_FIELD_COUNT).apply {
+                this[NativePcmProcessor.IDX_INPUT_MOMENTARY_LUFS] = -13.8
+                this[NativePcmProcessor.IDX_INPUT_SHORT_TERM_LUFS] = -14.2
+                this[NativePcmProcessor.IDX_OUTPUT_MOMENTARY_LUFS] = -17.1
+                this[NativePcmProcessor.IDX_OUTPUT_SHORT_TERM_LUFS] = -17.5
+                this[NativePcmProcessor.IDX_COMPRESSOR_GR_DB] = -3.4
+                this[NativePcmProcessor.IDX_MAKEUP_GAIN_DB] = -6.0
+                this[NativePcmProcessor.IDX_LOUDNESS_GAIN_DB] = 0.0
+                this[NativePcmProcessor.IDX_LIMITER_GAIN_DB] = -2.1
+                this[NativePcmProcessor.IDX_COMPLETED_HOPS] = 35.0
+                this[NativePcmProcessor.IDX_LIMITER_LIMITED_SAMPLES] = 48.0
+                this[NativePcmProcessor.IDX_INPUT_MOMENTARY_READY] = 1.0
+                this[NativePcmProcessor.IDX_INPUT_SHORT_TERM_READY] = 1.0
+                this[NativePcmProcessor.IDX_OUTPUT_MOMENTARY_READY] = 1.0
+                this[NativePcmProcessor.IDX_OUTPUT_SHORT_TERM_READY] = 1.0
+                this[NativePcmProcessor.IDX_LIMITER_ACTIVE] = 1.0
+                this[NativePcmProcessor.IDX_LIMITER_ENABLED] = 1.0
+            }
+        }
+        val processor = configured(LocalAudioProcessor(fake)).apply { setProcessingEnabled(true) }
+        val block = ShortArray(960 * 2) { 4000 }
+        processor.queueInput(samples(*block))
+        processor.output
+
+        val snap = processor.loudnessSnapshot
+        assertEquals(LocalAudioProcessor.ObservationState.ACTIVE, snap.state)
+        assertTrue(snap.limiterActive)
+        assertEquals(0.0, snap.loudnessGainDb, 1e-9)
+        assertEquals(35L, snap.completedHops)
+        assertEquals(48L, snap.limiterLimitedSamples)
+        assertEquals("-14.2 LUFS", snap.inputShortTermLabel())
+        assertEquals("-17.5 LUFS", snap.outputShortTermLabel())
+        assertTrue(snap.protectionStatusLabel().contains("限幅中"))
+        assertTrue(snap.gainSummaryLabel().contains("-3.4"))
+
+        // Switching processing off moves state cleanly back to BYPASS.
+        processor.setProcessingEnabled(false)
+        processor.queueInput(samples(*block))
+        processor.output
+        assertEquals(LocalAudioProcessor.ObservationState.BYPASS, processor.loudnessSnapshot.state)
+        assertFalse(processor.loudnessSnapshot.limiterActive)
+        processor.close()
+    }
+
+    @Test
+    fun `loudness snapshot is throttled at 4 Hz and tolerates telemetry failure and concurrent reads`() {
+        val fake = FakeCompressor().apply {
+            nextSnapshot = DoubleArray(NativePcmProcessor.SNAPSHOT_FIELD_COUNT).apply {
+                this[NativePcmProcessor.IDX_INPUT_MOMENTARY_LUFS] = -18.0
+                this[NativePcmProcessor.IDX_INPUT_SHORT_TERM_LUFS] = -18.5
+                this[NativePcmProcessor.IDX_OUTPUT_MOMENTARY_LUFS] = -18.0
+                this[NativePcmProcessor.IDX_OUTPUT_SHORT_TERM_LUFS] = -18.5
+                this[NativePcmProcessor.IDX_INPUT_MOMENTARY_READY] = 1.0
+                this[NativePcmProcessor.IDX_INPUT_SHORT_TERM_READY] = 1.0
+                this[NativePcmProcessor.IDX_OUTPUT_MOMENTARY_READY] = 1.0
+                this[NativePcmProcessor.IDX_OUTPUT_SHORT_TERM_READY] = 1.0
+                this[NativePcmProcessor.IDX_LIMITER_ENABLED] = 1.0
+            }
+        }
+        val processor = configured(LocalAudioProcessor(fake)).apply { setProcessingEnabled(true) }
+        val block = ShortArray(960 * 2) { 2000 } // 20 ms per block @ 48 kHz -> 100 blocks = 2.0 s
+
+        val readerError = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+        val keepReading = java.util.concurrent.atomic.AtomicBoolean(true)
+        val reader = Thread {
+            try {
+                while (keepReading.get()) {
+                    val snap = processor.loudnessSnapshot
+                    snap.statusLabel()
+                    snap.inputShortTermLabel()
+                    snap.outputShortTermLabel()
+                }
+            } catch (t: Throwable) {
+                readerError.compareAndSet(null, t)
+            }
+        }
+        reader.start()
+        try {
+            repeat(100) {
+                processor.queueInput(samples(*block))
+                processor.output
+            }
+            assertEquals(100L, processor.processedBlockCount)
+            assertTrue(
+                "Expected <= 12 snapshots across 100 20ms blocks, got ${processor.publishedSnapshotCount}",
+                processor.publishedSnapshotCount in 5L..12L,
+            )
+            assertTrue(fake.snapshotCalls <= 12)
+
+            // Telemetry errors must never degrade PCM processing into ERROR fallback.
+            fake.failSnapshot = true
+            repeat(20) {
+                processor.queueInput(samples(*block))
+                processor.output
+            }
+            assertEquals(LocalAudioProcessor.NativeState.ACTIVE, processor.nativeState)
+            assertNull(processor.nativeFailure)
+        } finally {
+            keepReading.set(false)
+            reader.join(2000L)
+            processor.close()
+        }
+        assertNull(readerError.get())
     }
 }

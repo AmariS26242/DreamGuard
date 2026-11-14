@@ -886,11 +886,187 @@ void limiter_tail_and_pcm_safety() {
     }
 }
 
+void observation_points_distinguish_input_output_and_states() {
+    constexpr std::int32_t kRate = 48000;
+    constexpr std::int32_t kChannels = 2;
+    constexpr double kPi = 3.14159265358979323846;
+
+    auto make_stereo_sine = [&](std::size_t frames, double amplitude) {
+        std::vector<std::int16_t> samples(frames * static_cast<std::size_t>(kChannels), 0);
+        for (std::size_t f = 0; f < frames; ++f) {
+            const double value =
+                amplitude * std::sin(2.0 * kPi * 1000.0 * static_cast<double>(f) / kRate);
+            const auto q = static_cast<std::int16_t>(std::llround(value * 32767.0));
+            samples[f * 2U] = q;
+            samples[f * 2U + 1U] = q;
+        }
+        return encode(samples);
+    };
+
+    auto feed_in_blocks = [&](dg_pcm16_processor* handle, const std::vector<std::uint8_t>& input,
+                              std::int32_t bypass) {
+        std::vector<std::uint8_t> out(4096U, 0);
+        dg_pcm16_processor_values values{};
+        std::size_t offset = 0;
+        while (offset < input.size()) {
+            const std::uint32_t chunk =
+                static_cast<std::uint32_t>(std::min<std::size_t>(out.size(), input.size() - offset));
+            EXPECT_STATUS(dg_pcm16_processor_process(handle, input.data() + offset, chunk,
+                                                     out.data(), chunk, bypass, &values),
+                          DG_OK);
+            offset += chunk;
+        }
+    };
+
+    {
+        auto cfg = config_for(kRate, kChannels, -18.0, 2.0, 6.0, 20.0, 250.0, 0.0, 1);
+        cfg.limiter_enabled = 1;
+        dg_pcm16_processor* handle = nullptr;
+        EXPECT_STATUS(dg_pcm16_processor_create(&cfg, &handle), DG_OK);
+
+        dg_pcm16_processor_observation obs{};
+        EXPECT_STATUS(dg_pcm16_processor_snapshot(nullptr, &obs), DG_ERR_NULL_HANDLE);
+        EXPECT_STATUS(dg_pcm16_processor_snapshot(handle, nullptr), DG_ERR_INVALID_ARGUMENT);
+
+        // Fresh state before feeding 400 ms / 3 s windows.
+        EXPECT_STATUS(dg_pcm16_processor_snapshot(handle, &obs), DG_OK);
+        CHECK(obs.completed_hops == 0);
+        CHECK(obs.hop_frames == 4800);
+        CHECK(obs.input_momentary_ready == 0 && obs.input_short_term_ready == 0);
+        CHECK(obs.output_momentary_ready == 0 && obs.output_short_term_ready == 0);
+        CHECK(obs.limiter_enabled == 1 && obs.limiter_active == 0 && obs.bypassed == 0);
+        CHECK(obs.loudness_gain_db == 0.0);
+        CHECK(std::isinf(obs.input_momentary_lufs) && obs.input_momentary_lufs < 0.0);
+        CHECK(std::isinf(obs.output_short_term_lufs) && obs.output_short_term_lufs < 0.0);
+
+        // 0.30 s (14400 frames = 3 hops): neither window ready.
+        feed_in_blocks(handle, make_stereo_sine(14400U, 0.1), 0);
+        EXPECT_STATUS(dg_pcm16_processor_snapshot(handle, &obs), DG_OK);
+        CHECK(obs.completed_hops == 3);
+        CHECK(obs.input_momentary_ready == 0 && obs.input_short_term_ready == 0);
+        CHECK(obs.output_momentary_ready == 0 && obs.output_short_term_ready == 0);
+
+        // +0.20 s -> 0.50 s total (5 hops): momentary ready, short-term unready.
+        feed_in_blocks(handle, make_stereo_sine(9600U, 0.1), 0);
+        EXPECT_STATUS(dg_pcm16_processor_snapshot(handle, &obs), DG_OK);
+        CHECK(obs.completed_hops == 5);
+        CHECK(obs.input_momentary_ready == 1 && obs.output_momentary_ready == 1);
+        CHECK(obs.input_short_term_ready == 0 && obs.output_short_term_ready == 0);
+        CHECK(std::isfinite(obs.input_momentary_lufs) &&
+              std::isfinite(obs.output_momentary_lufs));
+        CHECK(obs.limiter_active == 0);
+
+        // +2.70 s -> 3.20 s total (32 hops): both short-term windows ready, limiter inactive.
+        feed_in_blocks(handle, make_stereo_sine(129600U, 0.1), 0);
+        EXPECT_STATUS(dg_pcm16_processor_snapshot(handle, &obs), DG_OK);
+        CHECK(obs.completed_hops == 32);
+        CHECK(obs.input_short_term_ready == 1 && obs.output_short_term_ready == 1);
+        CHECK(obs.limiter_active == 0);
+        CHECK(obs.input_short_term_lufs > -25.0 && obs.input_short_term_lufs < -15.0);
+        CHECK(std::fabs(obs.input_short_term_lufs - obs.output_short_term_lufs) < 0.1);
+        CHECK(obs.loudness_gain_db == 0.0);
+
+        // 3.20 s digital silence after reset: ready == 1 and exact -Inf rather than 0 LUFS.
+        EXPECT_STATUS(dg_pcm16_processor_reset(handle), DG_OK);
+        const std::vector<std::uint8_t> silence(153600U * 4U, 0);
+        feed_in_blocks(handle, silence, 0);
+        EXPECT_STATUS(dg_pcm16_processor_snapshot(handle, &obs), DG_OK);
+        CHECK(obs.input_momentary_ready == 1 && obs.input_short_term_ready == 1);
+        CHECK(obs.output_momentary_ready == 1 && obs.output_short_term_ready == 1);
+        CHECK(std::isinf(obs.input_short_term_lufs) && obs.input_short_term_lufs < 0.0);
+        CHECK(std::isinf(obs.output_short_term_lufs) && obs.output_short_term_lufs < 0.0);
+
+        EXPECT_STATUS(dg_pcm16_processor_destroy(handle), DG_OK);
+    }
+
+    {
+        // High makeup drives post-compressor pre-limiter signal above -1 dBFS ceiling so
+        // pre-limiter input_lufs vs post-limiter output_lufs diverge clearly.
+        auto cfg = config_for(kRate, kChannels, -18.0, 2.0, 6.0, 20.0, 250.0, 12.0, 1);
+        cfg.limiter_enabled = 1;
+        dg_pcm16_processor* handle = nullptr;
+        EXPECT_STATUS(dg_pcm16_processor_create(&cfg, &handle), DG_OK);
+
+        feed_in_blocks(handle, make_stereo_sine(153600U, 0.9), 0);
+        dg_pcm16_processor_observation obs{};
+        EXPECT_STATUS(dg_pcm16_processor_snapshot(handle, &obs), DG_OK);
+        CHECK(obs.input_short_term_ready == 1 && obs.output_short_term_ready == 1);
+        CHECK(obs.limiter_enabled == 1 && obs.limiter_active == 1);
+        CHECK(obs.limiter_gain_db < -1.0);
+        CHECK(obs.limiter_limited_samples > 0);
+        CHECK(obs.last_call_limited_samples > 0);
+        CHECK(obs.output_short_term_lufs < obs.input_short_term_lufs - 1.0);
+        EXPECT_CLOSE(obs.makeup_gain_db, 12.0, 1e-9);
+        CHECK(obs.loudness_gain_db == 0.0);
+
+        const std::uint64_t hops_before = obs.completed_hops;
+        const double input_before = obs.input_short_term_lufs;
+        const std::uint64_t limited_before = obs.limiter_limited_samples;
+
+        // Bypass leaves LUFS analyzers and limiter counters frozen and flags bypassed=1.
+        feed_in_blocks(handle, make_stereo_sine(9600U, 0.5), 1);
+        EXPECT_STATUS(dg_pcm16_processor_snapshot(handle, &obs), DG_OK);
+        CHECK(obs.bypassed == 1);
+        CHECK(obs.limiter_active == 0);
+        CHECK(obs.last_call_limited_samples == 0);
+        CHECK(obs.completed_hops == hops_before);
+        CHECK(obs.limiter_limited_samples == limited_before);
+        CHECK(obs.input_short_term_lufs == input_before);
+
+        // Reset zeroes hop counters, readiness, and limiter telemetry.
+        EXPECT_STATUS(dg_pcm16_processor_reset(handle), DG_OK);
+        EXPECT_STATUS(dg_pcm16_processor_snapshot(handle, &obs), DG_OK);
+        CHECK(obs.completed_hops == 0 && obs.pending_frames == 0);
+        CHECK(obs.input_momentary_ready == 0 && obs.input_short_term_ready == 0);
+        CHECK(obs.output_momentary_ready == 0 && obs.output_short_term_ready == 0);
+        CHECK(obs.limiter_limited_samples == 0 && obs.last_call_limited_samples == 0);
+        CHECK(obs.limiter_active == 0 && obs.bypassed == 0);
+
+        EXPECT_STATUS(dg_pcm16_processor_destroy(handle), DG_OK);
+    }
+}
+
+void observation_accounts_for_tail_and_restarts_after_gaps() {
+    auto config = unity_config(48000, 1);
+    config.limiter_enabled = 1;
+    auto* handle = create_or_null(config);
+    if (!handle) return;
+    // Input is 32 frames short of a momentary window. The retained 64-frame
+    // startup delay makes the full emitted output long enough after drain.
+    auto input = encode(std::vector<int16_t>(19200 - 32, 1000));
+    std::vector<uint8_t> output(input.size());
+    EXPECT_STATUS(process(handle, input, output, 0), DG_OK);
+    dg_pcm16_processor_observation obs{};
+    EXPECT_STATUS(dg_pcm16_processor_snapshot(handle, &obs), DG_OK);
+    CHECK(!obs.input_momentary_ready && !obs.output_momentary_ready);
+    uint8_t tail[128] = {};
+    uint32_t bytes = 0;
+    EXPECT_STATUS(dg_pcm16_processor_drain(handle, tail, sizeof(tail), &bytes), DG_OK);
+    EXPECT_STATUS(dg_pcm16_processor_snapshot(handle, &obs), DG_OK);
+    CHECK(obs.output_momentary_ready == 1);
+    CHECK(obs.input_momentary_ready == 0);
+    CHECK(std::isfinite(obs.output_momentary_lufs));
+    // Resuming after a drained segment must not reuse its loudness window.
+    input = encode(std::vector<int16_t>(32, 2000)); output.resize(input.size());
+    EXPECT_STATUS(process(handle, input, output, 0), DG_OK);
+    EXPECT_STATUS(dg_pcm16_processor_snapshot(handle, &obs), DG_OK);
+    CHECK(obs.completed_hops == 0 && !obs.input_momentary_ready);
+    // Direct native bypass also separates observation segments, without
+    // resetting compressor/limiter audio state or counting bypass samples.
+    input = encode(std::vector<int16_t>(19200, 1000)); output.resize(input.size());
+    EXPECT_STATUS(process(handle, input, output, 0), DG_OK);
+    EXPECT_STATUS(process(handle, input, output, 1), DG_OK);
+    input = encode(std::vector<int16_t>(32, 2000)); output.resize(input.size());
+    EXPECT_STATUS(process(handle, input, output, 0), DG_OK);
+    EXPECT_STATUS(dg_pcm16_processor_snapshot(handle, &obs), DG_OK);
+    CHECK(obs.completed_hops == 0 && !obs.input_momentary_ready);
+    EXPECT_STATUS(dg_pcm16_processor_destroy(handle), DG_OK);
+}
+
 }  // namespace
 
 int main() {
     std::printf("dg_pcm16_processor_tests: PCM16 <-> DG-013 compressor bridge (DG-022)\n");
-
     run("create rejects unsupported channel counts",
         create_rejects_unsupported_channel_counts);
     run("create rejects bad compressor parameters",
@@ -930,6 +1106,10 @@ int main() {
     run("a new format gets a fresh handle", a_new_format_gets_a_fresh_handle);
     run("latency is zero", latency_is_zero);
     run("limiter PCM safety, drain, reset and short-stream tails", limiter_tail_and_pcm_safety);
+    run("observation points distinguish input, output and states",
+        observation_points_distinguish_input_output_and_states);
+    run("observation includes tails and restarts after gaps",
+        observation_accounts_for_tail_and_restarts_after_gaps);
 
     std::printf("%d checks, %d failure(s)\n", g_checks, g_failures);
     if (g_failures != 0) {

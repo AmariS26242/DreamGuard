@@ -1,0 +1,3 @@
+INSTRUMENTATION_RESULT: stream=PASS 100 real JNI cases; worst cold boundary=334 LSB; LUFS obs OK (in=-14.4, out=-14.5, gr=-8.1 dB)
+
+INSTRUMENTATION_CODE: -1

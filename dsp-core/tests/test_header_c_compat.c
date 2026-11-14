@@ -169,6 +169,19 @@ int main(void) {
                 printf("dg_header_c_compat: unexpected LUFS values\n");
                 return 1;
             }
+            {
+                dg_lufs_window_values window_values;
+                memset(&window_values, 0, sizeof(window_values));
+                if (dg_lufs_window_snapshot(lufs, &window_values) != DG_OK) {
+                    printf("dg_header_c_compat: dg_lufs_window_snapshot failed\n");
+                    return 1;
+                }
+                if (window_values.hop_frames != 4800 || window_values.momentary_ready != 0 ||
+                    window_values.short_term_ready != 0) {
+                    printf("dg_header_c_compat: unexpected LUFS window values\n");
+                    return 1;
+                }
+            }
         }
         if (dg_lufs_destroy(lufs) != DG_OK) {
             printf("dg_header_c_compat: dg_lufs_destroy failed\n");
@@ -419,6 +432,17 @@ int main(void) {
         if (dg_pcm16_processor_latency_frames(bridge) != 64) return 1;
         if (dg_pcm16_processor_process(bridge, bridge_input, sizeof(bridge_input),
                 bridge_output, sizeof(bridge_output), 0, &bridge_values) != DG_OK) return 1;
+        {
+            dg_pcm16_processor_observation observation;
+            memset(&observation, 0, sizeof(observation));
+            if (dg_pcm16_processor_snapshot(bridge, &observation) != DG_OK) return 1;
+            if (observation.limiter_enabled != 1 || observation.bypassed != 0 ||
+                observation.loudness_gain_db != 0.0 || observation.input_momentary_ready != 0 ||
+                observation.output_momentary_ready != 0) {
+                printf("dg_header_c_compat: unexpected PCM16 observation\n");
+                return 1;
+            }
+        }
         {
             uint8_t tail[128];
             uint32_t bytes = 0;

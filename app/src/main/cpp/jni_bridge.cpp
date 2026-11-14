@@ -273,6 +273,54 @@ Java_com_dreamguard_app_audio_NativePcmProcessor_nativeReset(JNIEnv*, jobject,
 }
 
 JNIEXPORT jint JNICALL
+Java_com_dreamguard_app_audio_NativePcmProcessor_nativeSnapshot(JNIEnv* env, jobject,
+                                                                  jlong handle,
+                                                                  jdoubleArray outValues) {
+    dg_pcm16_processor* processor = pcm16_from(handle);
+    if (processor == nullptr) {
+        return kPcm16NullHandle;
+    }
+    if (outValues == nullptr) {
+        return kPcm16InvalidArgument;
+    }
+    constexpr jint kSnapshotFieldCount = 16;
+    if (env->GetArrayLength(outValues) < kSnapshotFieldCount) {
+        return kPcm16InvalidArgument;
+    }
+
+    dg_pcm16_processor_observation obs{};
+    const dg_status status = dg_pcm16_processor_snapshot(processor, &obs);
+    if (status != DG_OK) {
+        return pcm16_error_code(status);
+    }
+
+    jdouble packed[kSnapshotFieldCount] = {
+        static_cast<jdouble>(obs.input_momentary_lufs),
+        static_cast<jdouble>(obs.input_short_term_lufs),
+        static_cast<jdouble>(obs.output_momentary_lufs),
+        static_cast<jdouble>(obs.output_short_term_lufs),
+        static_cast<jdouble>(obs.compressor_gain_reduction_db),
+        static_cast<jdouble>(obs.makeup_gain_db),
+        static_cast<jdouble>(obs.loudness_gain_db),
+        static_cast<jdouble>(obs.limiter_gain_db),
+        static_cast<jdouble>(obs.completed_hops),
+        static_cast<jdouble>(obs.limiter_limited_samples),
+        obs.input_momentary_ready != 0 ? 1.0 : 0.0,
+        obs.input_short_term_ready != 0 ? 1.0 : 0.0,
+        obs.output_momentary_ready != 0 ? 1.0 : 0.0,
+        obs.output_short_term_ready != 0 ? 1.0 : 0.0,
+        obs.limiter_active != 0 ? 1.0 : 0.0,
+        obs.limiter_enabled != 0 ? 1.0 : 0.0,
+    };
+    env->SetDoubleArrayRegion(outValues, 0, kSnapshotFieldCount, packed);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return kPcm16InvalidArgument;
+    }
+    return 0;
+}
+
+JNIEXPORT jint JNICALL
 Java_com_dreamguard_app_audio_NativePcmProcessor_nativeDestroy(JNIEnv*, jobject,
                                                                 jlong handle) {
     return pcm16_error_code(dg_pcm16_processor_destroy(pcm16_from(handle)));

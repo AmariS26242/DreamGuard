@@ -130,12 +130,16 @@ bool bench(int rate, uint32_t block, int ch, int repeats) {
             src[n * ch + c] = static_cast<float>(x);
             pcm[n * ch + c] = static_cast<int16_t>(x * 32767);
         }
-    const char* names[] = {"compressor", "sample_limiter", "true_peak_guard", "true_peak_meter",
-                           "pcm16_chain"};
-    const uint32_t latency[] = {0, dg_limiter_latency_frames(r.l), dg_limiter_latency_frames(r.g),
+    const char* names[] = {"compressor",      "sample_limiter", "true_peak_guard",
+                           "true_peak_meter", "pcm16_chain",    "pcm16_snapshot"};
+    const uint32_t latency[] = {0,
+                                dg_limiter_latency_frames(r.l),
+                                dg_limiter_latency_frames(r.g),
                                 DG_TRUE_PEAK_FILTER_LATENCY,
-                                dg_pcm16_processor_latency_frames(r.p)};
-    for (int chain = 0; chain < 5; ++chain) {
+                                dg_pcm16_processor_latency_frames(r.p),
+                                0};
+    dg_pcm16_processor_observation snap_obs{};
+    for (int chain = 0; chain < 6; ++chain) {
         auto process = [&](int i) {
             const auto offset = static_cast<std::size_t>(i % 32) * samples;
             dg_pcm_view in{src.data() + offset, block, ch};
@@ -149,7 +153,7 @@ bool bench(int rate, uint32_t block, int ch, int repeats) {
                     return dg_limiter_process(r.g, in, dst);
                 case 3:
                     return dg_true_peak_process(r.m, in);
-                default: {
+                case 4: {
                     dg_pcm16_processor_values v{};
                     const auto bytes = static_cast<uint32_t>(samples * 2);
                     const auto status = dg_pcm16_processor_process(r.p, pcm.data() + offset, bytes,
@@ -157,6 +161,8 @@ bool bench(int rate, uint32_t block, int ch, int repeats) {
                     return status != DG_OK || v.bytes_written != bytes ? DG_ERR_INVALID_ARGUMENT
                                                                        : DG_OK;
                 }
+                default:
+                    return dg_pcm16_processor_snapshot(r.p, &snap_obs);
             }
         };
         for (int i = 0; i < 32; ++i)
@@ -179,7 +185,8 @@ bool bench(int rate, uint32_t block, int ch, int repeats) {
         const double p95 = times[static_cast<std::size_t>(std::ceil(0.95 * repeats)) - 1];
         long rss, hwm;
         memory_kib(rss, hwm);
-        checksum = checksum + out[0] + pcm_out[0];
+        checksum = checksum + out[0] + pcm_out[0] +
+                   (std::isfinite(snap_obs.input_momentary_lufs) ? snap_obs.input_momentary_lufs : 0.0);
         std::printf("%s,%d,%u,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%.6f,%ld,%ld,%llu\n", names[chain],
                     rate, block, ch, repeats, median, p95, times.back(), cpu_us,
                     (1e6 * block / rate) / std::max(median, 1e-9), latency[chain],

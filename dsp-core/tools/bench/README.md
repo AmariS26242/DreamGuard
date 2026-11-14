@@ -6,9 +6,11 @@ The tool fails on setup/process errors, nonfinite checksum, or observed process
 allocations. Partial setup is released by RAII.
 
 The matrix is 5 rates (8000, 44100, 48000, 96000, 192000), 6 blocks
-(64, 128, 256, 512, 1024, 2048), mono/stereo, and 5 separate paths:
+(64, 128, 256, 512, 1024, 2048), mono/stereo, and 6 separate paths:
 compressor, sample limiter, conservative true-peak guard, true-peak meter,
-and the actual PCM16 compressor/guard/conversion chain. That gives 300 rows.
+the actual PCM16 compressor/guard/conversion chain, and its bounded observation
+snapshot. That gives 360 rows. The snapshot path times the native C query;
+it does not include JNI, Kotlin publication or UI costs.
 Each path has 32 warmup blocks and 200 measured calls by default, using 32
 consecutive blocks of deterministic tone/burst/DC input, then repeating them.
 

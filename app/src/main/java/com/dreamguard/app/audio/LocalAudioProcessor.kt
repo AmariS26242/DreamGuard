@@ -6,10 +6,13 @@ import androidx.media3.common.audio.BaseAudioProcessor
 import androidx.media3.common.util.UnstableApi
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 /**
  * The PCM stage on the Media3 playback path for **local** files, now backed by
@@ -95,6 +98,90 @@ class LocalAudioProcessor internal constructor(
         ERROR,
     }
 
+    /** UI-facing classification of the bounded loudness/protection pipeline. */
+    enum class ObservationState {
+        /** Bypassed or unavailable: no loudness/compression measurement runs. */
+        BYPASS,
+
+        /** Active processing, but 400 ms momentary window is not ready yet. */
+        OBSERVING,
+
+        /** Window ready, and observed level is digital silence or below `-60 LUFS`. */
+        SILENT_OR_LOW_LEVEL,
+
+        /** Valid finite loudness observation for active audio. */
+        ACTIVE,
+
+        /** Audio processing continues, but telemetry failed or was invalid. */
+        UNAVAILABLE,
+    }
+
+    /** Immutable throttled snapshot exposed to the playback service and UI. */
+    data class LoudnessSnapshot(
+        val state: ObservationState = ObservationState.BYPASS,
+        val inputMomentaryLufs: Double = Double.NEGATIVE_INFINITY,
+        val inputShortTermLufs: Double = Double.NEGATIVE_INFINITY,
+        val outputMomentaryLufs: Double = Double.NEGATIVE_INFINITY,
+        val outputShortTermLufs: Double = Double.NEGATIVE_INFINITY,
+        val compressorGainReductionDb: Double = 0.0,
+        val makeupGainDb: Double = 0.0,
+        val loudnessGainDb: Double = 0.0,
+        val limiterGainDb: Double = 0.0,
+        val completedHops: Long = 0L,
+        val limiterLimitedSamples: Long = 0L,
+        val inputMomentaryReady: Boolean = false,
+        val inputShortTermReady: Boolean = false,
+        val outputMomentaryReady: Boolean = false,
+        val outputShortTermReady: Boolean = false,
+        val limiterActive: Boolean = false,
+        val limiterEnabled: Boolean = false,
+    ) {
+        fun statusLabel(): String = when (state) {
+            ObservationState.BYPASS -> "直通（未压缩）"
+            ObservationState.OBSERVING -> "观测中（等待窗口就绪）"
+            ObservationState.SILENT_OR_LOW_LEVEL -> "静音 / 极低电平"
+            ObservationState.ACTIVE -> "实时观测"
+            ObservationState.UNAVAILABLE -> "观测暂不可用"
+        }
+
+        fun inputMomentaryLabel(): String =
+            formatLufs(state, inputMomentaryReady, inputMomentaryLufs)
+
+        fun inputShortTermLabel(): String =
+            formatLufs(state, inputShortTermReady, inputShortTermLufs)
+
+        fun outputMomentaryLabel(): String =
+            formatLufs(state, outputMomentaryReady, outputMomentaryLufs)
+
+        fun outputShortTermLabel(): String =
+            formatLufs(state, outputShortTermReady, outputShortTermLufs)
+
+        fun gainSummaryLabel(): String = when (state) {
+            ObservationState.BYPASS -> "直通"
+            ObservationState.UNAVAILABLE -> "观测暂不可用"
+            else -> String.format(
+                Locale.US,
+                "压缩 %+.1f dB · 补偿 %+.1f dB · 响度 %+.1f dB",
+                compressorGainReductionDb,
+                makeupGainDb,
+                loudnessGainDb,
+            )
+        }
+
+        fun protectionStatusLabel(): String = when {
+            state == ObservationState.BYPASS -> "峰值保护：直通未启用"
+            state == ObservationState.UNAVAILABLE -> "峰值保护：观测暂不可用"
+            !limiterEnabled -> "峰值保护：未启用"
+            limiterActive -> String.format(
+                Locale.US,
+                "峰值保护：限幅中 (%+.1f dB · %d 样点)",
+                limiterGainDb,
+                limiterLimitedSamples,
+            )
+            else -> "峰值保护：待命 ($limiterLimitedSamples 样点)"
+        }
+    }
+
     /** Whether PCM is currently allowed to be transformed. Volatile. */
     @Volatile
     var processingEnabled: Boolean = false
@@ -146,6 +233,25 @@ class LocalAudioProcessor internal constructor(
     private var suppressStartupDelay = false
     private var wasProcessingActive = false
     private var wetStep = 0
+    private val snapshotScratch = DoubleArray(NativePcmProcessor.SNAPSHOT_FIELD_COUNT)
+    private var framesSinceLastSnapshotPublish = 0L
+    private var processedFramesSinceReset = 0L
+    private var lastSnapshotState = ObservationState.BYPASS
+
+    /** Number of audio blocks processed through the active native path since creation. */
+    @Volatile
+    var processedBlockCount: Long = 0L
+        private set
+
+    /** Number of playback-thread snapshot publications (throttled ~4 Hz + transitions). */
+    @Volatile
+    var publishedSnapshotCount: Long = 0L
+        private set
+
+    /** Latest bounded loudness & protection observation for UI display. */
+    @Volatile
+    var loudnessSnapshot: LoudnessSnapshot = LoudnessSnapshot()
+        private set
 
     /** Whether the negotiated layout is one the compressor supports (1–2 ch). */
     @Volatile
@@ -179,6 +285,9 @@ class LocalAudioProcessor internal constructor(
             NativeState.UNSUPPORTED_FORMAT
         } else {
             NativeState.OFF
+        }
+        if (!enabled) {
+            loudnessSnapshot = LoudnessSnapshot()
         }
     }
 
@@ -228,6 +337,7 @@ class LocalAudioProcessor internal constructor(
 
         if (!enabled) {
             handleBypassBlock(inputBuffer, inputPosition, remaining, output, outputPosition)
+            publishBypassSnapshotIfNeeded()
             nativeState = if (rejectedFormat != null) {
                 NativeState.UNSUPPORTED_FORMAT
             } else {
@@ -265,6 +375,12 @@ class LocalAudioProcessor internal constructor(
                 output.position(outEnd)
                 output.flip()
                 nativeState = NativeState.ACTIVE
+                val activeFormat = nativeFormat ?: acceptedFormat
+                val activeChannels =
+                    (activeFormat?.channelCount ?: 1).coerceIn(MIN_NATIVE_CHANNELS, MAX_NATIVE_CHANNELS)
+                val blockFrames = (remaining / (activeChannels * 2)).toLong()
+                val sampleRate = activeFormat?.sampleRate ?: DEFAULT_OBSERVATION_SAMPLE_RATE
+                recordActiveObservation(handle, blockFrames, sampleRate)
                 return
             }
             // The native call may have written part of the block before failing;
@@ -287,6 +403,7 @@ class LocalAudioProcessor internal constructor(
         val activeFormat = nativeFormat ?: acceptedFormat
         val fallbackFrameBytes = (activeFormat?.channelCount ?: 1) * 2
         resetTransitionState(bypassEmitted = remaining >= fallbackFrameBytes)
+        publishBypassSnapshotIfNeeded()
         output.put(inputBuffer)
         output.flip()
         nativeState = if (nativeError != null) NativeState.ERROR else enabledState()
@@ -297,11 +414,14 @@ class LocalAudioProcessor internal constructor(
     private var released: Boolean = false
 
     override fun onQueueEndOfStream() {
-        if (!nativeTailPending) return
-        val output = replaceOutputBuffer(MAX_DRAIN_BYTES)
-        val outEnd = emitDrainedTail(output, output.position(), fadeToBypass = false)
-        output.position(outEnd)
-        output.flip()
+        if (nativeTailPending) {
+            val output = replaceOutputBuffer(MAX_DRAIN_BYTES)
+            val outEnd = emitDrainedTail(output, output.position(), fadeToBypass = false)
+            output.position(outEnd)
+            output.flip()
+        }
+        val handle = nativeHandle
+        if (processingEnabled && handle != 0L && nativeError == null) readAndPublishSnapshot(handle)
     }
 
     private fun handleBypassBlock(
@@ -635,6 +755,12 @@ class LocalAudioProcessor internal constructor(
             !processingEnabled -> NativeState.OFF
             else -> enabledState()
         }
+        resetSnapshotTrackers()
+        loudnessSnapshot = if (processingEnabled && nativeHandle != 0L && nativeError == null) {
+            LoudnessSnapshot(state = ObservationState.OBSERVING, limiterEnabled = true)
+        } else {
+            LoudnessSnapshot()
+        }
     }
 
     override fun onReset() {
@@ -644,6 +770,8 @@ class LocalAudioProcessor internal constructor(
         nativeLayout = false
         nativeError = null
         nativeState = NativeState.OFF
+        resetSnapshotTrackers()
+        loudnessSnapshot = LoudnessSnapshot()
     }
 
     /**
@@ -664,6 +792,133 @@ class LocalAudioProcessor internal constructor(
         processingEnabled = false
         nativeError = null
         nativeState = NativeState.OFF
+        resetSnapshotTrackers()
+        loudnessSnapshot = LoudnessSnapshot()
+    }
+
+    private fun resetSnapshotTrackers() {
+        framesSinceLastSnapshotPublish = 0L
+        processedFramesSinceReset = 0L
+        lastSnapshotState = ObservationState.BYPASS
+    }
+
+    private fun publishBypassSnapshotIfNeeded() {
+        if (lastSnapshotState != ObservationState.BYPASS || loudnessSnapshot.state != ObservationState.BYPASS) {
+            resetSnapshotTrackers()
+            loudnessSnapshot = LoudnessSnapshot()
+            publishedSnapshotCount++
+        }
+    }
+
+    private fun recordActiveObservation(handle: Long, blockFrames: Long, sampleRate: Int) {
+        processedBlockCount++
+        val validFrames = max(0L, blockFrames)
+        val framesBeforeBlock = processedFramesSinceReset
+        framesSinceLastSnapshotPublish += validFrames
+        processedFramesSinceReset += validFrames
+        val rate = max(1, sampleRate).toLong()
+        val publishIntervalFrames = max(1L, rate / SNAPSHOT_PUBLISH_HZ)
+        val hopFrames = max(1L, (rate + LUFS_HOPS_PER_SECOND / 2) / LUFS_HOPS_PER_SECOND)
+        val momentaryBoundaryReached =
+            framesBeforeBlock < MOMENTARY_HOPS * hopFrames && processedFramesSinceReset >= MOMENTARY_HOPS * hopFrames
+        val shortTermBoundaryReached =
+            framesBeforeBlock < SHORT_TERM_HOPS * hopFrames && processedFramesSinceReset >= SHORT_TERM_HOPS * hopFrames
+        val shouldPublish = lastSnapshotState == ObservationState.BYPASS ||
+            framesSinceLastSnapshotPublish >= publishIntervalFrames ||
+            momentaryBoundaryReached ||
+            shortTermBoundaryReached
+        if (shouldPublish) {
+            readAndPublishSnapshot(handle)
+        }
+    }
+
+    private fun readAndPublishSnapshot(handle: Long) {
+        // Throttle attempts as well as successful publications. A telemetry
+        // outage must not turn a display-rate read into one JNI call per block.
+        framesSinceLastSnapshotPublish = 0L
+        val status = try {
+            compressor.snapshot(handle, snapshotScratch)
+        } catch (_: Throwable) {
+            NativePcmProcessor.ERROR_DSP
+        }
+        if (status != 0 || !validSnapshotPacket()) {
+            if (lastSnapshotState != ObservationState.UNAVAILABLE) {
+                loudnessSnapshot = LoudnessSnapshot(state = ObservationState.UNAVAILABLE)
+                lastSnapshotState = ObservationState.UNAVAILABLE
+                publishedSnapshotCount++
+            }
+            return
+        }
+
+        val inputMomentaryLufs = snapshotScratch[NativePcmProcessor.IDX_INPUT_MOMENTARY_LUFS]
+        val inputShortTermLufs = snapshotScratch[NativePcmProcessor.IDX_INPUT_SHORT_TERM_LUFS]
+        val outputMomentaryLufs = snapshotScratch[NativePcmProcessor.IDX_OUTPUT_MOMENTARY_LUFS]
+        val outputShortTermLufs = snapshotScratch[NativePcmProcessor.IDX_OUTPUT_SHORT_TERM_LUFS]
+        val compressorGrDb = snapshotScratch[NativePcmProcessor.IDX_COMPRESSOR_GR_DB]
+        val makeupGainDb = snapshotScratch[NativePcmProcessor.IDX_MAKEUP_GAIN_DB]
+        val loudnessGainDb = snapshotScratch[NativePcmProcessor.IDX_LOUDNESS_GAIN_DB]
+        val limiterGainDb = snapshotScratch[NativePcmProcessor.IDX_LIMITER_GAIN_DB]
+        val completedHops =
+            snapshotScratch[NativePcmProcessor.IDX_COMPLETED_HOPS].roundToLong().coerceAtLeast(0L)
+        val limiterLimitedSamples =
+            snapshotScratch[NativePcmProcessor.IDX_LIMITER_LIMITED_SAMPLES].roundToLong()
+                .coerceAtLeast(0L)
+        val inputMomentaryReady =
+            snapshotScratch[NativePcmProcessor.IDX_INPUT_MOMENTARY_READY] >= 0.5
+        val inputShortTermReady =
+            snapshotScratch[NativePcmProcessor.IDX_INPUT_SHORT_TERM_READY] >= 0.5
+        val outputMomentaryReady =
+            snapshotScratch[NativePcmProcessor.IDX_OUTPUT_MOMENTARY_READY] >= 0.5
+        val outputShortTermReady =
+            snapshotScratch[NativePcmProcessor.IDX_OUTPUT_SHORT_TERM_READY] >= 0.5
+        val limiterActive = snapshotScratch[NativePcmProcessor.IDX_LIMITER_ACTIVE] >= 0.5
+        val limiterEnabled = snapshotScratch[NativePcmProcessor.IDX_LIMITER_ENABLED] >= 0.5
+
+        val anyReady = inputMomentaryReady || inputShortTermReady ||
+            outputMomentaryReady || outputShortTermReady
+        val inputLevel = if (inputShortTermReady) inputShortTermLufs else inputMomentaryLufs
+        val outputLevel = if (outputShortTermReady) outputShortTermLufs else outputMomentaryLufs
+        val inputLowOrSilent = !inputLevel.isFinite() || inputLevel <= LOW_LEVEL_FLOOR_LUFS
+        val outputLowOrSilent = !outputLevel.isFinite() || outputLevel <= LOW_LEVEL_FLOOR_LUFS
+        val nextState = when {
+            !anyReady -> ObservationState.OBSERVING
+            inputLowOrSilent && outputLowOrSilent -> ObservationState.SILENT_OR_LOW_LEVEL
+            else -> ObservationState.ACTIVE
+        }
+
+        loudnessSnapshot = LoudnessSnapshot(
+            state = nextState,
+            inputMomentaryLufs = inputMomentaryLufs,
+            inputShortTermLufs = inputShortTermLufs,
+            outputMomentaryLufs = outputMomentaryLufs,
+            outputShortTermLufs = outputShortTermLufs,
+            compressorGainReductionDb = compressorGrDb,
+            makeupGainDb = makeupGainDb,
+            loudnessGainDb = loudnessGainDb,
+            limiterGainDb = limiterGainDb,
+            completedHops = completedHops,
+            limiterLimitedSamples = limiterLimitedSamples,
+            inputMomentaryReady = inputMomentaryReady,
+            inputShortTermReady = inputShortTermReady,
+            outputMomentaryReady = outputMomentaryReady,
+            outputShortTermReady = outputShortTermReady,
+            limiterActive = limiterActive,
+            limiterEnabled = limiterEnabled,
+        )
+        lastSnapshotState = nextState
+        framesSinceLastSnapshotPublish = 0L
+        publishedSnapshotCount++
+    }
+
+    private fun validSnapshotPacket(): Boolean {
+        for (i in 0..3) {
+            val level = snapshotScratch[i]
+            if (!level.isFinite() && level != Double.NEGATIVE_INFINITY) return false
+        }
+        for (i in 4..9) if (!snapshotScratch[i].isFinite()) return false
+        for (i in 8..9) if (snapshotScratch[i] < 0.0) return false
+        for (i in 10..15) if (snapshotScratch[i] != 0.0 && snapshotScratch[i] != 1.0) return false
+        return true
     }
 
     private fun createNative(format: AudioProcessor.AudioFormat) {
@@ -723,6 +978,12 @@ class LocalAudioProcessor internal constructor(
         private const val DEFAULT_PROCESSED_GAIN = 0.5f
         private const val GAIN_TRACK_MIN_SAMPLE = 8
         private const val GAIN_TRACK_TAIL_FRAMES = 8
+        private const val DEFAULT_OBSERVATION_SAMPLE_RATE = 48_000
+        private const val SNAPSHOT_PUBLISH_HZ = 4L
+        private const val LUFS_HOPS_PER_SECOND = 10L
+        private const val MOMENTARY_HOPS = 4L
+        private const val SHORT_TERM_HOPS = 30L
+        private const val LOW_LEVEL_FLOOR_LUFS = -60.0
         private val WET_GAIN_TABLE = FloatArray(TRANSITION_FRAMES + 1) { step ->
             (0.5 * (1.0 - cos(Math.PI * step / TRANSITION_FRAMES))).toFloat()
         }
@@ -759,6 +1020,19 @@ private fun blendSamples(dry: Short, wet: Short, alpha: Float): Short {
 
 private fun clampPcm16(value: Int): Short =
     value.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+
+private fun formatLufs(
+    state: LocalAudioProcessor.ObservationState,
+    ready: Boolean,
+    value: Double,
+): String {
+    if (state == LocalAudioProcessor.ObservationState.BYPASS) return "直通"
+    if (state == LocalAudioProcessor.ObservationState.UNAVAILABLE) return "暂不可用"
+    if (!ready) return "观测中"
+    if (!value.isFinite()) return if (value == Double.NEGATIVE_INFINITY) "静音" else "观测无效"
+    if (value <= -60.0) return "极低 (≤ -60 LUFS)"
+    return String.format(Locale.US, "%.1f LUFS", value)
+}
 
 private fun AudioProcessor.AudioFormat.isSupportedPcm16(): Boolean =
     encoding == C.ENCODING_PCM_16BIT && channelCount > 0 && sampleRate > 0

@@ -115,6 +115,7 @@ class NativePcmProcessorContractTest {
             "nativeDrain",
             "nativeProcess",
             "nativeReset",
+            "nativeSnapshot",
             "nativeVersion",
         ).sorted()
     }

@@ -1,0 +1,12 @@
+﻿dg_meter tests
+  create validation
+  null handle and fresh state
+  rejections are atomic
+  dc and sine
+  stereo channels are independent
+  window and total
+  clip and non-finite counting
+  chunking is bit-identical
+  reset and peak hold
+  linear to dbfs
+  207 checks, 0 failures

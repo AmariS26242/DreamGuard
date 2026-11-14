@@ -15,30 +15,21 @@ Android local playback reach the compressor over JNI. No Android, no JNI, no pla
 > are in [stage evidence](../docs/evidence/dg014-015-2026-11-12/README.md).
 > Later sections include historical iterations; physical listening is pending.
 
-> **DG-012 is `IN_PROGRESS`, not verified.** The meter and LUFS sources are now
-> compiled and tested on Android x86_64 (API 35 emulator): `dg_meter` 207 checks /
-> 0 failures, `dg_lufs` 238 / 0, extended C-header smoke passed, and Debug/Release
-> build all three ABIs. What is still missing: no run on a real device, no
-> ASan/LSan job, arm64-v8a/armeabi-v7a have only been built, and the LUFS output
-> has **never been compared against a reference implementation** in a run that
-> passes — the harness for that comparison exists (`tools/lufs_compare/`); its
-> `--selfcheck` has now run twice (round 13: 113 checks / 1 failure, a bug in the
-> tool's signal generator; fixed, round 14: **115 checks / 0 failures**) and the
-> reference comparison itself ran for the first time in round 15:
-> **14 PASS / 2 FAIL / 0 SKIP, worst |delta| 0.049 LU, overall FAIL (exit 1)** —
-> report at `build/lufs-compare-android/reference-report.md`. The two failures are
-> `kind=undefined` cases (2 s digital silence, 0.3 s stream): we report
-> `integrated = -inf` with `integrated_ready = 0`, FFmpeg's `ebur128` prints
-> `I: -70.0 LUFS`, which is its *sentinel* for "no 400 ms block passed the −70 LUFS
-> absolute gate" (its `integrated_loudness` field starts at `ABS_THRES = -70`), not a
-> measurement. Both are left **not passing**, pending a human ruling; the rule was not
-> relaxed. A green self-check proves the tool and the analyser agree with each other,
-> not with the standard. FFmpeg 9.0.2 sits inside `build/reference-deps/` (not a system
-> install) and `compare_with_ffmpeg.ps1` takes a pre-generated `-Csv`/`-WavDir` pair,
-> which is how round 15 ran on a host without a C++ compiler. Note the reference only
-> prints one decimal (`%5.1f`), so every delta carries ±0.05 LU of rounding and
-> 0.049 LU cannot distinguish "close" from "the same".
-> Treat `dreamguard/lufs.h` as provisional.
+> **DG-012 is `DONE`, not `VERIFIED`.** The meter and LUFS sources have run
+> on Android x86_64 (API 35 emulator): `dg_meter` 207 checks / 0 failures,
+> `dg_lufs` 238 / 0, extended C-header smoke passed, and Debug/Release build all
+> three ABIs. `tools/lufs_compare --selfcheck` passed **115 checks / 0 failures**
+> (round 14), and the high-precision reference comparison against FFmpeg 9.0.2
+> (`ebur128=metadata=1`, 0.01 LU histogram resolution, round 18) passed on all
+> **14 comparable WAVs with worst |delta| = 0.010 LU**; the 2 undefined cases
+> (2 s digital silence, 0.3 s stream) were classified as **NO-DATA**
+> (`lavfi.r128.I = -70.000` sentinel, all momentary blocks < −70 LUFS), reported
+> separately and not counted as passes (`reference-report-metadata.md`).
+> What is still missing: no run on a real device, no `--libebur128`, no
+> ASan/LSan job, and arm64-v8a/armeabi-v7a have only been built.
+> Treat `dreamguard/lufs.h` as provisional (not broadcast-certified). Real-time
+> observation/control uses `dg_lufs_window_snapshot()` (bounded O(1) over the
+> 30-hop window), keeping `dg_lufs_snapshot()` for offline reporting.
 >
 > **DG-013 is `DONE` but not `VERIFIED`.** `compressor.h/.cpp` and
 > `tests/test_compressor.cpp` were written in round 10. The first real compile
@@ -138,17 +129,14 @@ dsp-core/
   rolling window, peak hold, clip and non-finite counters). It reads caller
   buffers only; it has no device, no capture path and no third-party volume
   control. Its peak is **not** a true peak (no oversampling).
-- `dreamguard/lufs.h` is a **PROVISIONAL** BS.1770-4-style integrated loudness
-  analyser. It reproduces the published 48 kHz K-weighting table to 1e-6 and is
-  anchored to a 1 kHz calibration with a known ≈0.024 LU offset, but it has
-  **not** been compared with libebur128, ffmpeg or any commercial meter, so it
-  must not be advertised as standards-compliant. It is not wired into playback
-  either. The comparison harness that produces that evidence lives in
-  `tools/lufs_compare/`: its self-check reached 115/0 in round 14 and the first
-  real comparison (round 15, summary-only path) was 14 PASS / 2 FAIL / 0 SKIP,
-  overall FAIL. Round 16 rewrote the script to use three-decimal
-  `lavfi.r128.I` metadata and a NO-DATA classification, but that path has **not
-  been executed**.
+- `dreamguard/lufs.h` is a **PROVISIONAL** BS.1770-4-style loudness analyser.
+  It reproduces the published 48 kHz K-weighting table to 1e-6, is anchored to
+  a 1 kHz calibration with a known ≈0.024 LU offset, and matched FFmpeg 9.0.2
+  `ebur128=metadata=1` across 14 comparable synthetic WAVs within 0.010 LU
+  (round 18; 2 undefined cases classified as `NO-DATA`), but it has not been
+  tested with `--libebur128` or on a physical device and must not be advertised
+  as broadcast-certified. P4-01 adds `dg_lufs_window_snapshot()` (O(1) over the
+  30-hop window) and wires two observation points into `dg_pcm16_processor`.
 - `dreamguard/compressor.h` is a **feed-forward** dynamic range compressor:
   threshold, ratio, symmetric soft knee, attack, release, optional stereo
   linking and a makeup gain, with the gain reduction itself smoothed so the gain
@@ -187,7 +175,7 @@ dsp-core/
 | `dg_meter_create/destroy/reset/reset_peak_hold` | meter lifetime, zeroing and peak-hold reset (DG-012) |
 | `dg_meter_process(view)`, `dg_meter_snapshot(values)` | stream frames, then read the current block/window/total/peak values |
 | `dg_meter_linear_to_dbfs(float)` | pure `20*log10(x)` helper (0 → `-INFINITY`) |
-| `dg_lufs_create/destroy/reset`, `dg_lufs_process`, `dg_lufs_snapshot` | PROVISIONAL loudness analyser (DG-012) |
+| `dg_lufs_create/destroy/reset`, `dg_lufs_process`, `dg_lufs_window_snapshot`, `dg_lufs_snapshot` | PROVISIONAL loudness analyser + O(1) bounded window snapshot (DG-012 / P4-01) |
 | `dg_lufs_k_weighting_for_rate(rate, out)` | the K-weighting biquad coefficients the analyser uses |
 | `dg_compressor_create/destroy/reset`, `dg_compressor_process`, `dg_compressor_snapshot` | feed-forward compressor (DG-013, 348/0 on x86_64 emulator) |
 | `dg_compressor_static_gain_db(config, level_db, out)` | pure query for the static knee/ratio curve, in dB of gain reduction |
@@ -250,8 +238,9 @@ blocks (1 hour at 10 blocks/s) and then drops the oldest, counting
 A stereo 1 kHz sine of peak amplitude A reads `20*log10(A) - 0.024` LUFS: the
 K-weighting gain at 1 kHz is ≈ +0.667 dB, which does not exactly cancel the
 −0.691 offset. That 0.024 LU bias is documented rather than hidden; the test
-tolerance is 0.1 LU. Everything above is **provisional** until the output is
-compared with a reference meter.
+tolerance is 0.1 LU. Everything above stays **provisional** (not
+broadcast-certified) until `--libebur128`, ASan/LSan and physical-device runs
+are also completed.
 
 ### Compressor (DG-013, DONE — not verified; wired into the PCM16 bridge, not device-tested)
 
@@ -404,22 +393,21 @@ or the 100 Hz / 10 kHz figures. Round 16 therefore replaced the reference readin
 with `ebur128=metadata=1` + `ametadata=mode=print` and the three-decimal
 `lavfi.r128.I` (0.01 LU histogram resolution), never widening the tolerance.
 
-The first high-precision retry did not produce a report: it exited 3 at the ffmpeg
-probe with `ffmpeg ... does not run`, although the same absolute path answered
-`-version` with 9.0.2 by hand. The probe piped native output into
-`Select-Object -First 1`; early pipeline teardown left a non-zero `$LASTEXITCODE`,
-and the version line was not validated. The probe now captures the full
-stdout+stderr, stores the real exit code first, requires the `ffmpeg version` line,
-and still fails on any non-zero probe or missing filter. That fix has **not been
-re-run**, so there is no `reference-report-metadata.md` and no high-precision
-verdict yet.
+The first high-precision retry (round 16) exited 3 at the ffmpeg probe with
+`ffmpeg ... does not run` because piping native output into `Select-Object -First 1`
+triggered early pipeline teardown and Windows CRLF line endings broke the
+version regex. After fixing the probe, **round 18 executed the high-precision
+metadata comparison end-to-end** against FFmpeg 9.0.2 (`ebur128=metadata=1`,
+same CSV SHA256 `B4106C5E...18B138C` + 16 WAVs): all **14 comparable cases
+PASSED with worst |delta| = 0.010 LU** (`stereo_asym_L-6_R-12dB_48k` and
+`stereo_1k_-20dB_192k`), and the 2 undefined cases (silence, 0.3 s) were
+classified as **NO-DATA** (`reference-report-metadata.md`, counted separately,
+not as numeric passes).
 
-Never run: `--libebur128` (no library on the host), the native host-compiler mode (no
-Windows C++ compiler), arm64-v8a / armeabi-v7a (built only), the high-precision
-comparison end-to-end, and any real device. DG-012 therefore stays
-`IN_PROGRESS / PROVISIONAL`: the round-15 error table exists, but the comparison as
-a whole failed and the reference is too coarse to settle it. See
-`tools/lufs_compare/README.md` for the commands.
+Never run: `--libebur128` (no library on the host), arm64-v8a / armeabi-v7a
+runtime tests (built only), ASan/LSan leak checks, and any real device. DG-012
+therefore stays `DONE` (not `VERIFIED`, and `lufs.h` remains `PROVISIONAL`
+for broadcast compliance). See `tools/lufs_compare/README.md` for the commands.
 
 Error codes (`dg_status`): `DG_OK`, `DG_ERR_INVALID_ARGUMENT`,
 `DG_ERR_SAMPLE_RATE_OUT_OF_RANGE`, `DG_ERR_CHANNEL_COUNT_OUT_OF_RANGE`,

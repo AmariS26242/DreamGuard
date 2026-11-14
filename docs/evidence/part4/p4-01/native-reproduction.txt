@@ -1,0 +1,37 @@
+dg_pcm16_processor_tests: PCM16 <-> DG-013 compressor bridge (DG-022)
+  create rejects unsupported channel counts
+  create rejects bad compressor parameters
+  create rejects null arguments
+  create accepts every supported rate and layout
+  null handle is reported
+  zero byte call is a no-op
+  bypass is byte exact including a partial frame
+  bypass accepts the identical pointer
+  unity gain round trips every int16 value
+  minus six dB makeup halves the signal
+  saturation clamps instead of wrapping
+  full scale block converges to the static curve
+  reset returns the compressor to unity
+  linked channels share one gain
+  unlinked channels are independent
+  chunking does not change the bytes
+  partial frames are copied verbatim
+  a stereo partial frame is preserved
+  a larger output capacity is accepted
+  bypass does not touch the compressor state
+  processing does not modify a separate input
+  undersized output is rejected without writing
+  null buffers are rejected when bytes are nonzero
+  partial overlap is rejected
+  in place processing matches separate buffers
+  a new format gets a fresh handle
+  latency is zero
+  limiter PCM safety, drain, reset and short-stream tails
+  observation points distinguish input, output and states
+  observation includes tails and restarts after gaps
+    FAIL line 1046: obs.output_momentary_ready == 1
+    FAIL line 1048: std::isfinite(obs.output_momentary_lufs)
+    FAIL line 1053: obs.completed_hops == 0 && !obs.input_momentary_ready
+    FAIL line 1062: obs.completed_hops == 0 && !obs.input_momentary_ready
+1026 checks, 4 failure(s)
+FAILED

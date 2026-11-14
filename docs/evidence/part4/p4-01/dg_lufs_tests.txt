@@ -1,0 +1,16 @@
+﻿dg_lufs tests
+  create validation
+  null handles
+  k-weighting matches published table
+  stereo calibration and channel sum
+  window availability
+  window snapshot matches and distinguishes silence
+  silence is minus infinity
+  gating
+    gating: blocks=67 after_abs=61 used=40 integrated=-23.1696
+  relative gate keeps near blocks
+  non-finite samples are contained
+  rejections are atomic
+  reset returns to fresh state
+  chunking is bit-identical
+  302 checks, 0 failures

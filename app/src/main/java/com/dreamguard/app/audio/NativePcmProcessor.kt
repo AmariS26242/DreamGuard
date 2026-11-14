@@ -46,6 +46,25 @@ internal object NativePcmProcessor {
     const val ERROR_NOT_DIRECT: Int = -3
     const val ERROR_DSP: Int = -4
 
+    /** Snapshot array indices packed by [nativeSnapshot]. */
+    const val SNAPSHOT_FIELD_COUNT: Int = 16
+    const val IDX_INPUT_MOMENTARY_LUFS: Int = 0
+    const val IDX_INPUT_SHORT_TERM_LUFS: Int = 1
+    const val IDX_OUTPUT_MOMENTARY_LUFS: Int = 2
+    const val IDX_OUTPUT_SHORT_TERM_LUFS: Int = 3
+    const val IDX_COMPRESSOR_GR_DB: Int = 4
+    const val IDX_MAKEUP_GAIN_DB: Int = 5
+    const val IDX_LOUDNESS_GAIN_DB: Int = 6
+    const val IDX_LIMITER_GAIN_DB: Int = 7
+    const val IDX_COMPLETED_HOPS: Int = 8
+    const val IDX_LIMITER_LIMITED_SAMPLES: Int = 9
+    const val IDX_INPUT_MOMENTARY_READY: Int = 10
+    const val IDX_INPUT_SHORT_TERM_READY: Int = 11
+    const val IDX_OUTPUT_MOMENTARY_READY: Int = 12
+    const val IDX_OUTPUT_SHORT_TERM_READY: Int = 13
+    const val IDX_LIMITER_ACTIVE: Int = 14
+    const val IDX_LIMITER_ENABLED: Int = 15
+
     /**
      * True when `libdreamguard_dsp.so` loaded. Loaded lazily and only once;
      * a missing library is an expected state on the JVM and on unsupported ABIs,
@@ -107,6 +126,9 @@ internal object NativePcmProcessor {
     fun drain(handle: Long, output: ByteBuffer, outputOffset: Int): Int =
         if (isAvailable) nativeDrain(handle, output, outputOffset) else ERROR_NULL_HANDLE
 
+    fun snapshot(handle: Long, outValues: DoubleArray): Int =
+        if (isAvailable) nativeSnapshot(handle, outValues) else ERROR_NULL_HANDLE
+
     fun destroy(handle: Long): Int = if (isAvailable) nativeDestroy(handle) else ERROR_NULL_HANDLE
 
     fun version(): String = if (isAvailable) nativeVersion() else "native unavailable"
@@ -139,6 +161,8 @@ internal object NativePcmProcessor {
     private external fun nativeReset(handle: Long): Int
 
     private external fun nativeDrain(handle: Long, output: ByteBuffer, outputOffset: Int): Int
+
+    private external fun nativeSnapshot(handle: Long, outValues: DoubleArray): Int
 
     private external fun nativeDestroy(handle: Long): Int
 

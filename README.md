@@ -8,7 +8,7 @@ DreamGuard 是一个 Android-first 的睡眠声景应用骨架：Jetpack Compose
 
 > 2026-11-12：本地 PCM16 已接入压缩后的保守 4× 峰值保护，正常结束和切换直通会完整输出尾部。DG-014/015 开发阶段完成，独立参考 120/0、JVM 142/0、300 项性能矩阵已归档。真机听感与长测后补。[阶段报告](docs/evidence/dg014-015-2026-11-12/README.md)
 
-下一阶段已制定 [Part 4：响度匹配与自然听感计划](docs/PART4_PLAN.md)，五项实施任务当前均为 TODO。
+[Part 4：响度匹配与自然听感](docs/PART4_PLAN.md) 的 P4-01 响度观测已审查并接入；P4-02～P4-05 待开始。[P4-01 审查报告](docs/evidence/part4/p4-01/REVIEW.md)
 
 A1/A2 已补齐切换对齐与淡化，并通过独立复核和真实 JNI 模拟器信号检查。单次冷启动延迟仍保留，稳态直通保持原字节，真机听感待测。[审查报告](docs/AUDIT_REPORT.md)
 

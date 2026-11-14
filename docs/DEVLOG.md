@@ -10,6 +10,51 @@
 
 ---
 
+## 2026-11-14 — 第 40 轮 P4-01 审查与上传
+
+**任务** 用户确认只审查并上传 P4-01，不实施 P4-02。基线 `87c3f4a`，第 39 轮为交接时工作区实现。
+
+**修正** 无效快照计数会导致 Kotlin roundToLong 抛异常，已加入完整字段校验；观测失败清除旧值、显示暂不可用，按音频帧限制失败重试，就绪边界只触发一次并对齐 native hop 舍入。旁路/排空后恢复观测从新窗口开始，保留音频处理历史；LUFS reset 逻辑清空范围，不再扫描历史块。湿声尾部计入 output_lufs，EOS 在排空后发布。界面明确观测支路范围，并修正开关挤压、字段换行。
+
+**证据** 两个 JVM 反例修前失败；原生新增用例修前四个断言失败。修后全量 JVM **158/0/0**、LocalAudioProcessor **37 项**，九组原生回归通过（LUFS **302/0**，PCM16 **1026/0**），Debug/Release 三 ABI 成功。最终 APK 的真实 JNI 100 组切换及 LUFS、旁路恢复、EOS 断言通过。模拟器界面播放显示约 −28.0 LUFS，暂停后关闭处理显示直通，截图已核验。
+
+**运行条件及性能** 最初出现约 40 秒的界面启动超时，系统线程转储亦未完成；重新启动只读测试模拟器后，同一功能版本约 3 秒启动并正常更新，最终 UI 版本约 3.4 秒。未据此确认根因。保留交接 CSV（PCM16 / guard 有 9 / 10 组 p95 超预算）和首次复测（20 / 19 组）；完成构建、停止应用后串行复测，相同基准 360 行的 p95 均低于块时长，C++ new/new[] 均为 0。查询最大 median/p95 为 17.6/30.3 µs；不把差异直接归因于调度，不保证真机或每次回调的实时性。
+
+**状态** P4-01 DONE，不标 VERIFIED；DG-022 / DG-023 仍 IN_PROGRESS。P4-02～P4-05、自动响度与预设保持 TODO。真机与长测沿用原安排。[完整审查](evidence/part4/p4-01/REVIEW.md)，[证据](evidence/part4/p4-01/README.md)。
+
+---
+
+## 2026-11-14 — 第 39 轮 P4-01 响度观测与数据通路
+
+> 本节保留交接时的实现与测量记录；审查后结果以第 40 轮和 REVIEW.md 为准。原先关于性能异常原因的推断未经证实，不作为最终结论。
+
+**日期** 2026-11-14
+
+**Commit** 未提交（基于 `87c3f4a` 工作区继续开发；含原仓库残留未跟踪构建日志未清理）。
+
+**修改模块** `dsp-core`（`lufs.h`、`lufs.cpp`、`pcm16_processor.h`、`pcm16_processor.cpp`、`dsp-core/README.md`、`test_lufs.cpp`、`test_pcm16_processor.cpp`、`test_header_c_compat.c`、`dg_bench.cpp`）、Android Native/Kotlin/UI（`jni_bridge.cpp`、`NativePcmProcessor.kt`、`PcmCompressor.kt`、`LocalAudioProcessor.kt`、`PlaybackService.kt`、`DreamGuardScreen.kt`）、测试与文档（`NativePcmProcessorContractTest.kt`、`LocalAudioProcessorTest.kt`、`AudioTransitionCheck.kt`、`docs/PART4_PLAN.md`、`docs/STATUS.md`、`docs/DEVLOG.md`、`docs/evidence/part4/p4-01/`）。
+
+**完成任务** P4-01（响度观测与数据通路，支撑 DG-012 / DG-020 / DG-022 / DG-023），保持 `loudness_gain_db == 0.0` 且不提前改动 P4-02 自动响度控制或 P4-03 预设：
+1. 更新 `lufs.h`/`lufs.cpp`/`test_lufs.cpp`/`dsp-core/README.md` 与第 18 轮 FFmpeg 9.0.2 `ebur128=metadata=1` 对照结果（14 可比样本全过、worst `|delta| = 0.010 LU`、2 例无定义 `NO-DATA`）及有效采样率范围一致，并保留 `PROVISIONAL` 与非广播认证边界。
+2. 在 `lufs.h`/`lufs.cpp` 新增 `O(1)` 环形窗读取 `dg_lufs_window_snapshot()`（4 hop 瞬时 / 30 hop 短时，复用为 `dg_lufs_snapshot()` 窗口部分，避免每音频块全历史 integrated 扫描）。
+3. 在 `dg_pcm16_processor` 接入两处观测分析器：`input_lufs`（压缩器与 `-6.0206 dB` 固定补偿后、峰值限制器前）与 `output_lufs`（峰值限制器后湿输出）；新增无堆分配 `dg_pcm16_processor_snapshot()` 汇报双端 LUFS、就绪标志、压缩 GR、限幅增益/触发状态（`last_bypassed == 0` 门控）、旁路态与 hop 进度。旁路路径沿用原字节直通不触发分析计数。
+4. 在 `jni_bridge.cpp` 暴露 `nativeSnapshot`（栈定长 16 项 `jdouble` 传出），同步扩展 `NativePcmProcessor.kt`、`PcmCompressor.kt`；在 `LocalAudioProcessor` 落地不可变 `LoudnessSnapshot` 与 4 Hz（`sampleRate / 4` 帧）+ 就绪/旁路/EOS 边界节流发布，未就绪显示“观测中”、静音/`-Inf` 显示“静音”、`<= -60 LUFS` 显示“极低”，绝不误显示为 `0 LUFS`。通过 `PlaybackService.localLoudnessSnapshot` 在 `DreamGuardScreen.kt` `LocalAudioCard` 以 250 ms 节流展示。
+
+**测试设备** 本机 JVM；Android Debug/Release 三 ABI NDK 27.0.12077973 构建；Android API 35 x86_64 模拟器（`emulator-5554`）。
+
+**测试结果**
+- **JVM 单元测试（`:app:testDebugUnitTest`）**：13 个测试类共 **155 tests / 0 failures / 0 skipped**（`LocalAudioProcessorTest` 34 项、`NativePcmProcessorContractTest` 5 项）。
+- **APK 构建（`:app:assembleDebug :app:assembleRelease`）**：全部成功，`arm64-v8a` / `armeabi-v7a` / `x86_64` 原生编译及 `lintVitalRelease` 零报错通过。
+- **Android 原生测试（`emulator-5554`，`run_android.ps1`）**：9 个可执行程序全部 PASS（`dg_lufs_tests` **302/0**、`dg_pcm16_processor_tests` **1009/0**、`dg_header_c_compat_test` PASSED、`dg_limiter_tests` **3706/0**、`dg_compressor_tests` **348/0**、`dg_lifecycle_tests` **1328/0**、`dg_pcm_tests` **139/0**、`dg_meter_tests` **207/0**、`dg_true_peak_tests` **215/0**）。测试调整说明：高电平正弦急切全零后，K 加权 RLB 38 Hz 高通 IIR 拖尾会令首 0.2 s 残余跨入 3 s 短时窗而呈极大负值而非即刻 `-Inf`，已在 `test_lufs.cpp` 与 `test_pcm16_processor.cpp` 中区分验证“切换零输入衰减低于 `-60 LUFS`”与“reset 后纯静音严格 `-Inf`”。
+- **基准测试（`emulator-5554`，`docs/evidence/part4/p4-01/bench.csv`）**：6 条链路 × 60 配置共 **360 行**，全量 `cpp_alloc_calls = 0`、全量 `xRT >= 2.931`（最低为 `pcm16_chain 192000/2048/2`）；新增 `pcm16_snapshot` 链路 `max_median_us = 0.303 us`、`max_p95_us = 0.317 us`。墙钟 `p95_us` 在 `pcm16_chain` 有 9 组高频/大块配置超过块音频时长（最高 `44100/2048/2` `60772.805 us`），同期对照 `true_peak_guard` 存在 10 组、且改前基线 `docs/evidence/transition-review/bench.csv` 的 `pcm16_chain` 本已有 11 组超时，当时怀疑与宿主调度有关，原因未经确认；所有配置的 `median_us`（`<= 3639.311 us`）与 `cpu_us_per_call`（`<= 4902.525 us`）均低于对应块时长，`48000 Hz` `512/1024/2048` 块 `pcm16_chain` `p95` 亦均未超时。
+- **Debug JNI 端到端校验（`emulator-5554`，`AudioTransitionCheck`）**：`PASS 100 real JNI cases; worst cold boundary=334 LSB; LUFS obs OK (in=-14.4, out=-14.5, gr=-8.1 dB)`，`INSTRUMENTATION_CODE: -1`。
+
+**未解决问题** 缺 iQOO Z9T 等物理真机听感、真机性能复测与 UI 截图比对；自动响度增益控制（P4-02）及 Natural/Balanced/Protection 模式与持久化（P4-03）尚未实施。
+
+**下一步任务** 执行 P4-02（缓慢响度控制，DG-040）：在 `dsp-core` 实现独立测试的稳定性门控、死区与上下行速率限制器并接入 `dg_pcm16_processor`。
+
+---
+
 ## 2026-11-14 — 第 38 轮 Antigravity A1/A2 复核
 
 **任务** 用户提供 Antigravity 无缝切换交接记录，要求审查并上传。审查覆盖其八个已修改文件和未提交的审计草稿，基线为 `acc1d0b`。A1 的 JNI 保留规则、合约测试、CI 宿主 CTest 入口及 PowerShell 退出码处理保留。

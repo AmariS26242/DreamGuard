@@ -86,7 +86,11 @@ class AudioTransitionCheck : Instrumentation() {
                     }
                 }
             }
-            result.putString("stream", "PASS $cases real JNI cases; worst cold boundary=$worstColdBoundary LSB\n")
+            val loudnessSummary = verifyLoudnessObservation()
+            result.putString(
+                "stream",
+                "PASS $cases real JNI cases; worst cold boundary=$worstColdBoundary LSB; $loudnessSummary\n",
+            )
             finish(Activity.RESULT_OK, result)
         } catch (error: Throwable) {
             result.putString("stream", "FAIL ${error.stackTraceToString()}\n")
@@ -166,6 +170,102 @@ class AudioTransitionCheck : Instrumentation() {
             return result.toByteArray()
         } finally {
             NativePcmProcessor.destroy(handle)
+        }
+    }
+
+    private fun verifyLoudnessObservation(): String {
+        val rate = 48_000
+        val channels = 2
+        val processor = LocalAudioProcessor()
+        try {
+            processor.configure(AudioProcessor.AudioFormat(rate, channels, C.ENCODING_PCM_16BIT))
+            processor.flush()
+            check(processor.nativeCapable) { processor.nativeFailure ?: "Unsupported observation format" }
+            processor.setProcessingEnabled(true)
+
+            fun feed(pcmBytes: ByteArray, chunkFrames: Int = 2400) {
+                val src = ByteBuffer.allocateDirect(pcmBytes.size).order(ByteOrder.nativeOrder())
+                src.put(pcmBytes).flip()
+                val stride = chunkFrames * channels * 2
+                var pos = 0
+                while (pos < pcmBytes.size) {
+                    val end = minOf(pos + stride, pcmBytes.size)
+                    src.limit(end)
+                    src.position(pos)
+                    processor.queueInput(src)
+                    check(processor.nativeFailure == null) { processor.nativeFailure ?: "Process error" }
+                    processor.output.let { out -> out.position(out.limit()) }
+                    pos = end
+                }
+            }
+
+            // 1. 0.20 s (< 400 ms window) -> OBSERVING, never 0 LUFS.
+            val shortTone = input(9_600, channels) { frame, _ ->
+                (3277.0 * sin(2.0 * Math.PI * 1000.0 * frame / rate)).toInt()
+            }
+            feed(shortTone)
+            val unreadySnap = processor.loudnessSnapshot
+            check(unreadySnap.state == LocalAudioProcessor.ObservationState.OBSERVING) {
+                "Expected OBSERVING before 400 ms, got ${unreadySnap.state}"
+            }
+            check(!unreadySnap.inputShortTermReady && unreadySnap.inputShortTermLabel() == "观测中") {
+                "Expected unready label 观测中, got ${unreadySnap.inputShortTermLabel()}"
+            }
+
+            // 2. 3.20 s silence -> SILENT_OR_LOW_LEVEL with -Inf LUFS.
+            processor.flush()
+            val silence = ByteArray(153_600 * channels * 2)
+            feed(silence)
+            val silentSnap = processor.loudnessSnapshot
+            check(silentSnap.state == LocalAudioProcessor.ObservationState.SILENT_OR_LOW_LEVEL) {
+                "Expected SILENT_OR_LOW_LEVEL for silence, got ${silentSnap.state}"
+            }
+            check(silentSnap.inputShortTermReady && silentSnap.outputShortTermReady)
+            check(silentSnap.inputShortTermLufs == Double.NEGATIVE_INFINITY)
+            check(silentSnap.inputShortTermLabel() == "静音")
+
+            // 3. 3.20 s full-scale steady sine -> ACTIVE with compressor GR and -6.02 dB makeup.
+            processor.flush()
+            val loudTone = input(153_600, channels) { frame, _ ->
+                (31000.0 * sin(2.0 * Math.PI * 1000.0 * frame / rate)).toInt()
+            }
+            feed(loudTone)
+            val activeSnap = processor.loudnessSnapshot
+            check(activeSnap.state == LocalAudioProcessor.ObservationState.ACTIVE) {
+                "Expected ACTIVE for loud tone, got ${activeSnap.state}"
+            }
+            check(activeSnap.inputShortTermReady && activeSnap.outputShortTermReady)
+            check(activeSnap.inputShortTermLufs.isFinite() && activeSnap.outputShortTermLufs.isFinite())
+            check(activeSnap.compressorGainReductionDb < -2.0) {
+                "Expected compressor GR < -2 dB, got ${activeSnap.compressorGainReductionDb}"
+            }
+            check(abs(activeSnap.makeupGainDb + 6.0206) < 0.01)
+            check(activeSnap.loudnessGainDb == 0.0)
+
+            // 4. Bypass switches observation cleanly back to BYPASS.
+            processor.setProcessingEnabled(false)
+            feed(input(2400, channels) { _, _ -> 1000 })
+            check(processor.loudnessSnapshot.state == LocalAudioProcessor.ObservationState.BYPASS)
+
+            // Resuming after bypass starts a new observation window, without
+            // changing compressor history or the established transition tests.
+            processor.setProcessingEnabled(true)
+            feed(shortTone)
+            check(processor.loudnessSnapshot.state == LocalAudioProcessor.ObservationState.OBSERVING)
+            check(!processor.loudnessSnapshot.inputMomentaryReady)
+
+            // EOS must meter the retained wet tail and publish afterwards.
+            processor.flush()
+            feed(input(19200 - 32, channels) { _, _ -> 1000 })
+            check(!processor.loudnessSnapshot.outputMomentaryReady)
+            processor.queueEndOfStream()
+            processor.output.let { out -> out.position(out.limit()) }
+            check(processor.loudnessSnapshot.outputMomentaryReady)
+            check(!processor.loudnessSnapshot.inputMomentaryReady)
+
+            return "LUFS obs OK (in=${String.format("%.1f", activeSnap.inputShortTermLufs)}, out=${String.format("%.1f", activeSnap.outputShortTermLufs)}, gr=${String.format("%.1f", activeSnap.compressorGainReductionDb)} dB)"
+        } finally {
+            processor.close()
         }
     }
 }

@@ -92,10 +92,16 @@ void write_values(dg_pcm16_processor_values* out_values, uint32_t frames,
 struct dg_pcm16_processor {
     dg_compressor* compressor = nullptr;
     dg_limiter* limiter = nullptr;
+    dg_lufs* input_lufs = nullptr;
+    dg_lufs* output_lufs = nullptr;
     bool pending_tail = false;
+    bool observation_needs_reset = false;
     int32_t sample_rate = 0;
     int32_t channel_count = 0;
     uint32_t frame_bytes = 0;
+    double makeup_gain_db = 0.0;
+    uint64_t last_call_limited_samples = 0;
+    int32_t last_bypassed = 0;
     /* One chunk of interleaved floats; the compressor's input view and output
      * buffer both describe it, which is an exact in-place operation. */
     float scratch[static_cast<std::size_t>(DG_PCM16_CHUNK_FRAMES) *
@@ -149,6 +155,7 @@ dg_status dg_pcm16_processor_create(const dg_pcm16_processor_config* config,
     processor->channel_count = config->channel_count;
     processor->frame_bytes =
         static_cast<uint32_t>(config->channel_count) * DG_PCM16_BYTES_PER_SAMPLE;
+    processor->makeup_gain_db = config->makeup_gain_db;
     if (config->limiter_enabled != 0) {
         dg_limiter_config safety{};
         safety.sample_rate = config->sample_rate;
@@ -164,6 +171,17 @@ dg_status dg_pcm16_processor_create(const dg_pcm16_processor_config* config,
             return limiter_status;
         }
     }
+    const dg_lufs_config lufs_config{config->sample_rate, config->channel_count};
+    const dg_status in_lufs_status = dg_lufs_create(&lufs_config, &processor->input_lufs);
+    if (in_lufs_status != DG_OK) {
+        dg_pcm16_processor_destroy(processor);
+        return in_lufs_status;
+    }
+    const dg_status out_lufs_status = dg_lufs_create(&lufs_config, &processor->output_lufs);
+    if (out_lufs_status != DG_OK) {
+        dg_pcm16_processor_destroy(processor);
+        return out_lufs_status;
+    }
     *out_processor = processor;
     return DG_OK;
 }
@@ -172,9 +190,14 @@ dg_status dg_pcm16_processor_destroy(dg_pcm16_processor* processor) {
     if (processor == nullptr) {
         return DG_ERR_NULL_HANDLE;
     }
-    (void)dg_compressor_destroy(processor->compressor);
+    if (processor->compressor != nullptr) (void)dg_compressor_destroy(processor->compressor);
     if (processor->limiter != nullptr) (void)dg_limiter_destroy(processor->limiter);
+    if (processor->input_lufs != nullptr) (void)dg_lufs_destroy(processor->input_lufs);
+    if (processor->output_lufs != nullptr) (void)dg_lufs_destroy(processor->output_lufs);
     processor->compressor = nullptr;
+    processor->limiter = nullptr;
+    processor->input_lufs = nullptr;
+    processor->output_lufs = nullptr;
     delete processor;
     return DG_OK;
 }
@@ -184,7 +207,12 @@ dg_status dg_pcm16_processor_reset(dg_pcm16_processor* processor) {
         return DG_ERR_NULL_HANDLE;
     }
     processor->pending_tail = false;
+    processor->observation_needs_reset = false;
+    processor->last_call_limited_samples = 0;
+    processor->last_bypassed = 0;
     if (processor->limiter != nullptr) (void)dg_limiter_reset(processor->limiter);
+    if (processor->input_lufs != nullptr) (void)dg_lufs_reset(processor->input_lufs);
+    if (processor->output_lufs != nullptr) (void)dg_lufs_reset(processor->output_lufs);
     return dg_compressor_reset(processor->compressor);
 }
 
@@ -230,8 +258,24 @@ dg_status dg_pcm16_processor_process(dg_pcm16_processor* processor,
 
     if (bypass != 0) {
         std::memmove(destination, source, input_bytes);
+        processor->last_call_limited_samples = 0;
+        processor->last_bypassed = 1;
+        processor->observation_needs_reset = true;
         write_values(out_values, frames, input_bytes, 1, 0.0);
         return DG_OK;
+    }
+
+    if (frames > 0 && processor->observation_needs_reset) {
+        (void)dg_lufs_reset(processor->input_lufs);
+        (void)dg_lufs_reset(processor->output_lufs);
+        processor->observation_needs_reset = false;
+    }
+    uint64_t limited_before = 0;
+    if (processor->limiter != nullptr) {
+        dg_limiter_values before_values{};
+        if (dg_limiter_snapshot(processor->limiter, &before_values) == DG_OK) {
+            limited_before = before_values.limited_samples;
+        }
     }
 
     uint32_t frame_index = 0;
@@ -262,10 +306,20 @@ dg_status dg_pcm16_processor_process(dg_pcm16_processor* processor,
         if (status != DG_OK) {
             return status;
         }
+        const dg_status in_obs_status =
+            dg_lufs_process(processor->input_lufs, input_view);
+        if (in_obs_status != DG_OK) {
+            return in_obs_status;
+        }
         if (processor->limiter != nullptr) {
             const auto limiter_status = dg_limiter_process(processor->limiter, input_view, output_view);
             if (limiter_status != DG_OK) return limiter_status;
             processor->pending_tail = true;
+        }
+        const dg_status out_obs_status =
+            dg_lufs_process(processor->output_lufs, input_view);
+        if (out_obs_status != DG_OK) {
+            return out_obs_status;
         }
 
         for (std::size_t sample = 0; sample < samples; ++sample) {
@@ -275,6 +329,20 @@ dg_status dg_pcm16_processor_process(dg_pcm16_processor* processor,
         }
         frame_index += chunk_frames;
     }
+
+    if (processor->limiter != nullptr) {
+        dg_limiter_values after_values{};
+        if (dg_limiter_snapshot(processor->limiter, &after_values) == DG_OK &&
+            after_values.limited_samples >= limited_before) {
+            processor->last_call_limited_samples =
+                after_values.limited_samples - limited_before;
+        } else {
+            processor->last_call_limited_samples = 0;
+        }
+    } else {
+        processor->last_call_limited_samples = 0;
+    }
+    processor->last_bypassed = 0;
 
     if (processed_bytes < input_bytes) {
         /* A partial frame (for stereo a single sample, or one odd byte for
@@ -305,12 +373,90 @@ dg_status dg_pcm16_processor_drain(dg_pcm16_processor* processor, void* output,
     const auto status = dg_limiter_flush(processor->limiter,
         {processor->scratch, latency, processor->channel_count}, &frames);
     if (status != DG_OK) return status;
+    const auto observation_status = dg_lufs_process(processor->output_lufs,
+        {processor->scratch, frames, processor->channel_count});
+    if (observation_status != DG_OK) return observation_status;
     auto* destination = static_cast<uint8_t*>(output);
     for (uint32_t i = 0; i < frames * processor->channel_count; ++i) {
         store_sample(destination + i * 2, quantize(processor->scratch[i]));
     }
     processor->pending_tail = false;
+    // Keep final windows available to snapshot; the next processed segment
+    // starts fresh without resetting the compressor or changing audio history.
+    processor->observation_needs_reset = true;
     *out_bytes = bytes;
+    return DG_OK;
+}
+
+dg_status dg_pcm16_processor_snapshot(
+    const dg_pcm16_processor* processor,
+    dg_pcm16_processor_observation* out_observation) {
+    if (out_observation == nullptr) {
+        return DG_ERR_INVALID_ARGUMENT;
+    }
+    if (processor == nullptr) {
+        return DG_ERR_NULL_HANDLE;
+    }
+
+    dg_lufs_window_values in_window{};
+    const dg_status in_status =
+        dg_lufs_window_snapshot(processor->input_lufs, &in_window);
+    if (in_status != DG_OK) {
+        return in_status;
+    }
+
+    dg_lufs_window_values out_window{};
+    const dg_status out_status =
+        dg_lufs_window_snapshot(processor->output_lufs, &out_window);
+    if (out_status != DG_OK) {
+        return out_status;
+    }
+
+    dg_compressor_values comp_values{};
+    const dg_status comp_status =
+        dg_compressor_snapshot(processor->compressor, &comp_values);
+    if (comp_status != DG_OK) {
+        return comp_status;
+    }
+
+    dg_limiter_values lim_values{};
+    if (processor->limiter != nullptr) {
+        const dg_status lim_status =
+            dg_limiter_snapshot(processor->limiter, &lim_values);
+        if (lim_status != DG_OK) {
+            return lim_status;
+        }
+    }
+
+    dg_pcm16_processor_observation obs{};
+    obs.input_momentary_lufs = in_window.momentary_lufs;
+    obs.input_short_term_lufs = in_window.short_term_lufs;
+    obs.output_momentary_lufs = out_window.momentary_lufs;
+    obs.output_short_term_lufs = out_window.short_term_lufs;
+    obs.compressor_gain_reduction_db = comp_values.gain_reduction_db;
+    obs.makeup_gain_db = processor->makeup_gain_db;
+    obs.loudness_gain_db = 0.0;
+    obs.limiter_gain_db =
+        processor->limiter != nullptr ? lim_values.current_gain_db : 0.0;
+    obs.completed_hops = in_window.completed_hops;
+    obs.limiter_limited_samples =
+        processor->limiter != nullptr ? lim_values.limited_samples : 0;
+    obs.last_call_limited_samples = processor->last_call_limited_samples;
+    obs.hop_frames = in_window.hop_frames;
+    obs.pending_frames = in_window.pending_frames;
+    obs.input_momentary_ready = in_window.momentary_ready;
+    obs.input_short_term_ready = in_window.short_term_ready;
+    obs.output_momentary_ready = out_window.momentary_ready;
+    obs.output_short_term_ready = out_window.short_term_ready;
+    obs.limiter_enabled = processor->limiter != nullptr ? 1 : 0;
+    obs.limiter_active =
+        (processor->last_bypassed == 0 && processor->limiter != nullptr &&
+         (processor->last_call_limited_samples > 0 ||
+          lim_values.current_gain_db < -1e-4))
+            ? 1
+            : 0;
+    obs.bypassed = processor->last_bypassed;
+    *out_observation = obs;
     return DG_OK;
 }
 

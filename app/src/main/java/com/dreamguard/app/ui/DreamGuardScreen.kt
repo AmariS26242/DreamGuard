@@ -26,10 +26,12 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -128,6 +130,16 @@ fun DreamGuardScreen() {
     val processingEnabled = playback.localProcessingEnabled
     val processingAvailable = playback.localProcessingAvailable
     val formatNote = playback.localFormatNote
+    var loudnessSnapshot by remember(playback) {
+        mutableStateOf(playback.localLoudnessSnapshot)
+    }
+    LaunchedEffect(playback, localActive, localPlaying, processingEnabled, stateRevision) {
+        loudnessSnapshot = playback.localLoudnessSnapshot
+        while (localActive && processingEnabled && localPlaying) {
+            delay(250L)
+            loudnessSnapshot = playback.localLoudnessSnapshot
+        }
+    }
     // ACTION_OPEN_DOCUMENT: the system picker grants a persistable read grant, so the
     // service can keep playing the file after the activity is gone.
     val pickAudio = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -332,6 +344,7 @@ fun DreamGuardScreen() {
                 playing = localPlaying,
                 processingEnabled = processingEnabled,
                 processingAvailable = processingAvailable,
+                loudnessSnapshot = loudnessSnapshot,
                 onPick = { pickAudio.launch(arrayOf("audio/*")) },
                 onTogglePlayback = { playback.toggleLocalPlayback() },
                 onClose = { playback.closeLocalAudio() },
@@ -534,6 +547,7 @@ private fun LocalAudioCard(
     playing: Boolean,
     processingEnabled: Boolean,
     processingAvailable: Boolean,
+    loudnessSnapshot: LocalAudioProcessor.LoudnessSnapshot,
     onPick: () -> Unit,
     onTogglePlayback: () -> Unit,
     onClose: () -> Unit,
@@ -599,7 +613,7 @@ private fun LocalAudioCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "处理（${LocalAudioProcessor.GAIN_LABEL}）",
                         color = MaterialTheme.colorScheme.onSurface,
@@ -621,7 +635,77 @@ private fun LocalAudioCard(
                     enabled = processingAvailable || processingEnabled,
                 )
             }
+            if (active) {
+                Spacer(Modifier.height(10.dp))
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color.White.copy(alpha = 0.04f),
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "响度与保护观测",
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            Text(
+                                text = loudnessSnapshot.statusLabel(),
+                                color = MaterialTheme.colorScheme.primary,
+                                fontSize = 11.sp,
+                            )
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        ObservationRow(
+                            label = "输入（压缩后 / 限幅前）",
+                            value = "短时 ${loudnessSnapshot.inputShortTermLabel()} · 瞬时 ${loudnessSnapshot.inputMomentaryLabel()}",
+                        )
+                        Spacer(Modifier.height(3.dp))
+                        ObservationRow(
+                            label = "处理支路（限幅后）",
+                            value = "短时 ${loudnessSnapshot.outputShortTermLabel()} · 瞬时 ${loudnessSnapshot.outputMomentaryLabel()}",
+                        )
+                        Spacer(Modifier.height(3.dp))
+                        ObservationRow(
+                            label = "增益分配",
+                            value = loudnessSnapshot.gainSummaryLabel(),
+                        )
+                        Spacer(Modifier.height(3.dp))
+                        ObservationRow(
+                            label = "安全边界",
+                            value = loudnessSnapshot.protectionStatusLabel(),
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "仅观测处理支路；切换过渡会混入原声。",
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                            fontSize = 10.sp,
+                        )
+                    }
+                }
+            }
         }
+    }
+}
+
+@Composable
+private fun ObservationRow(label: String, value: String) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = label,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+            fontSize = 11.sp,
+        )
+        Text(
+            text = value,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.82f),
+            fontSize = 11.sp,
+        )
     }
 }
 

@@ -18,11 +18,13 @@
 //   * chunking: any split of the same stream produces bit-identical results;
 //   * descriptor validation and NULL-handle behaviour.
 //
-// What these tests do NOT establish: no reference implementation (ffmpeg
-// ebur128, libebur128, a broadcast meter) has been run against this code, so the
-// component stays PROVISIONAL and no output is claimed to be BS.1770-4
-// compliant. There is no sample-rate conversion, no surround or LFE weighting,
-// and no true-peak measurement here.
+// What these tests do NOT establish: these self-contained tests alone do not
+// establish agreement with a reference meter (that comparison is performed by
+// tools/lufs_compare/ against FFmpeg 9.0.2 ebur128 metadata: 14 comparable WAVs
+// within 0.010 LU, 2 undefined NO-DATA cases; --libebur128, ASan/LSan and
+// physical-device runs remain unexecuted, so the component stays PROVISIONAL
+// and is not claimed to be broadcast-certified). There is no sample-rate
+// conversion, no surround or LFE weighting, and no true-peak measurement here.
 
 #include <cmath>
 #include <cstdint>
@@ -524,6 +526,98 @@ void test_chunking_is_bit_identical() {
     EXPECT_STATUS(dg_lufs_destroy(chunked), DG_OK);
 }
 
+void test_window_snapshot_matches_and_distinguishes_silence() {
+    const dg_lufs_config config = make_config(48000, 2);
+    dg_lufs* lufs = nullptr;
+    EXPECT_STATUS(dg_lufs_create(&config, &lufs), DG_OK);
+
+    dg_lufs_window_values win{};
+    EXPECT_STATUS(dg_lufs_window_snapshot(nullptr, &win), DG_ERR_NULL_HANDLE);
+    EXPECT_STATUS(dg_lufs_window_snapshot(lufs, nullptr), DG_ERR_INVALID_ARGUMENT);
+
+    EXPECT_STATUS(dg_lufs_window_snapshot(lufs, &win), DG_OK);
+    CHECK(win.completed_hops == 0);
+    CHECK(win.hop_frames == 4800);
+    CHECK(win.pending_frames == 0);
+    CHECK(win.momentary_ready == 0);
+    CHECK(win.short_term_ready == 0);
+    CHECK(std::isinf(win.momentary_lufs) && win.momentary_lufs < 0.0);
+    CHECK(std::isinf(win.short_term_lufs) && win.short_term_lufs < 0.0);
+
+    // 0.35 s: 3 completed hops (< 4 hops momentary window) -> neither window is ready.
+    const auto part1 = tone(16800, 2, 48000.0, 1000.0, 0.2, 0.2);
+    EXPECT_STATUS(dg_lufs_process(lufs, view_of(part1, 2)), DG_OK);
+    EXPECT_STATUS(dg_lufs_window_snapshot(lufs, &win), DG_OK);
+    CHECK(win.completed_hops == 3);
+    CHECK(win.pending_frames == 2400);
+    CHECK(win.momentary_ready == 0);
+    CHECK(win.short_term_ready == 0);
+    CHECK(std::isinf(win.momentary_lufs) && win.momentary_lufs < 0.0);
+    CHECK(std::isinf(win.short_term_lufs) && win.short_term_lufs < 0.0);
+
+    // +0.15 s -> 0.50 s total (5 hops): momentary ready, short-term still unready.
+    const auto part2 = tone(7200, 2, 48000.0, 1000.0, 0.2, 0.2);
+    EXPECT_STATUS(dg_lufs_process(lufs, view_of(part2, 2)), DG_OK);
+    EXPECT_STATUS(dg_lufs_window_snapshot(lufs, &win), DG_OK);
+    const dg_lufs_values full_mid = snapshot(lufs);
+    CHECK(win.completed_hops == 5);
+    CHECK(win.pending_frames == 0);
+    CHECK(win.momentary_ready == 1);
+    CHECK(win.short_term_ready == 0);
+    CHECK(win.momentary_lufs == full_mid.momentary_lufs);
+    CHECK(std::isfinite(win.momentary_lufs) &&
+          win.momentary_lufs > DG_LUFS_LOW_LEVEL_FLOOR_LUFS);
+    CHECK(std::isinf(win.short_term_lufs) && win.short_term_lufs < 0.0);
+
+    // +2.70 s -> 3.20 s total (32 hops >= 30 hops short-term window): both windows ready.
+    const auto part3 = tone(129600, 2, 48000.0, 1000.0, 0.2, 0.2);
+    EXPECT_STATUS(dg_lufs_process(lufs, view_of(part3, 2)), DG_OK);
+    EXPECT_STATUS(dg_lufs_window_snapshot(lufs, &win), DG_OK);
+    const dg_lufs_values full_ready = snapshot(lufs);
+    CHECK(win.completed_hops == 32);
+    CHECK(win.momentary_ready == 1);
+    CHECK(win.short_term_ready == 1);
+    CHECK(win.momentary_lufs == full_ready.momentary_lufs);
+    CHECK(win.short_term_lufs == full_ready.short_term_lufs);
+    CHECK(std::isfinite(win.short_term_lufs) &&
+          win.short_term_lufs > DG_LUFS_LOW_LEVEL_FLOOR_LUFS);
+
+    // Push 3.20 s of zeros right after tone: momentary window (last 0.4 s) and short-term
+    // window (including 0.2 s..3.2 s K-weighting RLB IIR tail) drop well below low-level floor.
+    const std::vector<float> silence(153600U * 2U, 0.0F);
+    EXPECT_STATUS(dg_lufs_process(lufs, view_of(silence, 2)), DG_OK);
+    EXPECT_STATUS(dg_lufs_window_snapshot(lufs, &win), DG_OK);
+    CHECK(win.completed_hops == 64);
+    CHECK(win.momentary_ready == 1);
+    CHECK(win.short_term_ready == 1);
+    CHECK(win.momentary_lufs <= DG_LUFS_LOW_LEVEL_FLOOR_LUFS);
+    CHECK(win.short_term_lufs <= DG_LUFS_LOW_LEVEL_FLOOR_LUFS);
+
+    // After reset, 3.20 s of pure digital silence produces ready == 1 and exact -Inf.
+    EXPECT_STATUS(dg_lufs_reset(lufs), DG_OK);
+    EXPECT_STATUS(dg_lufs_window_snapshot(lufs, &win), DG_OK);
+    CHECK(win.completed_hops == 0);
+    CHECK(win.pending_frames == 0);
+    CHECK(win.momentary_ready == 0);
+    CHECK(win.short_term_ready == 0);
+
+    EXPECT_STATUS(dg_lufs_process(lufs, view_of(silence, 2)), DG_OK);
+    EXPECT_STATUS(dg_lufs_window_snapshot(lufs, &win), DG_OK);
+    CHECK(win.momentary_ready == 1);
+    CHECK(win.short_term_ready == 1);
+    CHECK(std::isinf(win.momentary_lufs) && win.momentary_lufs < 0.0);
+    CHECK(std::isinf(win.short_term_lufs) && win.short_term_lufs < 0.0);
+
+    EXPECT_STATUS(dg_lufs_reset(lufs), DG_OK);
+    EXPECT_STATUS(dg_lufs_window_snapshot(lufs, &win), DG_OK);
+    CHECK(win.completed_hops == 0);
+    CHECK(win.pending_frames == 0);
+    CHECK(win.momentary_ready == 0);
+    CHECK(win.short_term_ready == 0);
+
+    EXPECT_STATUS(dg_lufs_destroy(lufs), DG_OK);
+}
+
 }  // namespace
 
 int main() {
@@ -533,6 +627,8 @@ int main() {
     run("k-weighting matches published table", test_k_weighting_matches_published_table);
     run("stereo calibration and channel sum", test_stereo_calibration_and_channel_sum);
     run("window availability", test_window_availability);
+    run("window snapshot matches and distinguishes silence",
+        test_window_snapshot_matches_and_distinguishes_silence);
     run("silence is minus infinity", test_silence_is_minus_infinity);
     run("gating", test_gating);
     run("relative gate keeps near blocks", test_relative_gate_keeps_near_blocks);

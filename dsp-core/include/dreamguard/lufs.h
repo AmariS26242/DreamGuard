@@ -1,14 +1,23 @@
 /* DreamGuard DSP core - LUFS loudness analysis (DG-012).
  *
- * STATUS: PROVISIONAL. NOT VERIFIED AGAINST A REFERENCE IMPLEMENTATION.
+ * STATUS: PROVISIONAL (NOT BROADCAST-CERTIFIED).
  *
  * The algorithm follows ITU-R BS.1770-4 (K-weighting, 400 ms gating blocks with
  * 75 % overlap, a -70 LUFS absolute gate and a -10 LU relative gate) and the
- * EBU R128 / Tech 3341 calibration convention, but no third-party tool
- * (ffmpeg ebur128, libebur128, a broadcast loudness meter, ...) has been run
- * against this workspace. Do NOT describe this component or its output as
- * "BS.1770-4 compliant" until that comparison exists and its error is recorded.
- * See docs/STATUS.md and docs/DEVLOG.md for the exact evidence status.
+ * EBU R128 / Tech 3341 calibration convention.
+ *
+ * Verification status:
+ *   - tools/lufs_compare --selfcheck passed 115 checks / 0 failures on NDK
+ *     x86_64 (API 35 emulator, round 14);
+ *   - High-precision comparison against FFmpeg 9.0.2 (ebur128=metadata=1,
+ *     0.01 LU histogram resolution) passed on all 14 comparable synthetic WAVs
+ *     with worst |delta| = 0.010 LU; the 2 undefined cases (2 s silence and
+ *     0.3 s stream) were classified as NO-DATA (FFmpeg -70.000 ABS_THRES
+ *     sentinel, all momentary blocks < -70 LUFS) (round 18);
+ *   - NOT tested against libebur128 (--libebur128), NOT verified with ASan/LSan
+ *     or on a physical device, and NOT a broadcast standard compliance
+ *     certificate. Do NOT describe this component as "BS.1770-4 certified".
+ *   See docs/STATUS.md and docs/DEVLOG.md for the exact evidence status.
  *
  * Standard and units
  * ------------------
@@ -37,10 +46,11 @@
  * ------------
  * 8000..192000 Hz. The two biquads are the BS.1770 analog prototype
  * discretised with the bilinear transform (the derivation libebur128 uses), so
- * the 48 kHz coefficients reproduce the published BS.1770-4 table; the tests
- * check that reproduction to 1e-6 and are the only numeric evidence this
- * workspace has. Rates other than 48 kHz are derived, not published, and the
- * whole component stays PROVISIONAL until a reference comparison exists.
+ * the 48 kHz coefficients reproduce the published BS.1770-4 table (checked to
+ * 1e-6); other rates use the same bilinear derivation and have been cross-
+ * checked on synthetic tones (8..192 kHz) against FFmpeg 9.0.2 ebur128 metadata
+ * within 0.010 LU. The component stays PROVISIONAL until physical-device and
+ * libebur128 verification are completed.
  *
  * Windows and gating
  * ------------------
@@ -80,7 +90,9 @@
  * ---------
  * All functions on one handle must be externally serialized. There are no locks,
  * atomics or reference counts. dg_lufs_snapshot() walks the stored blocks and is
- * O(blocks); call it at display rate.
+ * O(blocks); reserve it for offline reporting. Real-time observation and
+ * control must use dg_lufs_window_snapshot(), which reads only the bounded
+ * 30-hop (3 s) window in O(1) time without scanning the 1-hour block store.
  */
 
 #ifndef DREAMGUARD_DSP_LUFS_H
@@ -100,6 +112,9 @@ extern "C" {
 #define DG_LUFS_HOP_MS 100
 #define DG_LUFS_MOMENTARY_MS 400
 #define DG_LUFS_SHORT_TERM_MS 3000
+#define DG_LUFS_MOMENTARY_HOPS 4
+#define DG_LUFS_SHORT_TERM_HOPS 30
+#define DG_LUFS_LOW_LEVEL_FLOOR_LUFS (-60.0)
 #define DG_LUFS_ABSOLUTE_GATE_LUFS (-70.0)
 #define DG_LUFS_RELATIVE_GATE_LU (-10.0)
 #define DG_LUFS_LOUDNESS_OFFSET (-0.691)
@@ -141,6 +156,21 @@ typedef struct dg_lufs_values {
     int32_t integrated_ready;         /* 1 when integrated_lufs is finite */
 } dg_lufs_values;
 
+/* Bounded O(1) window snapshot for real-time observation and control.
+ * Does not scan the 1-hour integrated block store. */
+typedef struct dg_lufs_window_values {
+    double momentary_lufs;       /* last complete 400 ms window (4 hops), or -INFINITY */
+    double short_term_lufs;      /* last complete 3 s window (30 hops), or -INFINITY */
+    uint64_t completed_hops;     /* 100 ms hops completed since create/reset */
+    uint64_t non_finite_samples; /* NaN/Inf samples replaced with 0 */
+    uint32_t hop_frames;         /* frames per 100 ms hop (rounded to 1 frame) */
+    uint32_t momentary_frames;   /* frames per 400 ms window (4 * hop_frames) */
+    uint32_t short_term_frames;  /* frames per 3 s window (30 * hop_frames) */
+    uint32_t pending_frames;     /* frames accumulated toward the next hop */
+    int32_t momentary_ready;     /* 1 when completed_hops >= 4 (even if silence -> -INFINITY) */
+    int32_t short_term_ready;    /* 1 when completed_hops >= 30 (even if silence -> -INFINITY) */
+} dg_lufs_window_values;
+
 /* Creates a LUFS analyser for one stream.
  *
  *   DG_ERR_INVALID_ARGUMENT            config or out_lufs was NULL
@@ -171,6 +201,14 @@ dg_status dg_lufs_process(dg_lufs* lufs, dg_pcm_view input);
  *   DG_ERR_INVALID_ARGUMENT out_values was NULL
  *   DG_ERR_NULL_HANDLE     lufs was NULL */
 dg_status dg_lufs_snapshot(const dg_lufs* lufs, dg_lufs_values* out_values);
+
+/* Writes the bounded O(1) momentary/short-term window values without scanning
+ * the integrated block store.
+ *   DG_OK                   *out_values was written
+ *   DG_ERR_INVALID_ARGUMENT out_values was NULL
+ *   DG_ERR_NULL_HANDLE      lufs was NULL */
+dg_status dg_lufs_window_snapshot(const dg_lufs* lufs,
+                                  dg_lufs_window_values* out_values);
 
 /* Pure query for the K-weighting coefficients this component would use at a
  * given sample rate, without creating a handle. Useful to inspect or regress the

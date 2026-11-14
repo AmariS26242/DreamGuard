@@ -1,0 +1,3 @@
+java.lang.IllegalArgumentException: Cannot round NaN value.
+java.lang.AssertionError: failed snapshots retried every block
+Both new telemetry counterexamples failed before fixes; all 158 JVM tests passed afterwards.

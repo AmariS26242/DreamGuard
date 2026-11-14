@@ -45,6 +45,9 @@ internal interface PcmCompressor {
     /** Emits retained PCM at EOS/before bypass. At most 256 bytes (64 stereo frames). */
     fun drain(handle: Long, output: ByteBuffer, outputOffset: Int): Int = 0
 
+    /** Reads the bounded loudness/protection snapshot into [outValues] (`0` on success). */
+    fun snapshot(handle: Long, outValues: DoubleArray): Int = NativePcmProcessor.ERROR_NULL_HANDLE
+
     fun destroy(handle: Long)
 }
 
@@ -84,6 +87,9 @@ internal object JniPcmCompressor : PcmCompressor {
 
     override fun drain(handle: Long, output: ByteBuffer, outputOffset: Int): Int =
         NativePcmProcessor.drain(handle, output, outputOffset)
+
+    override fun snapshot(handle: Long, outValues: DoubleArray): Int =
+        NativePcmProcessor.snapshot(handle, outValues)
 
     override fun destroy(handle: Long) {
         NativePcmProcessor.destroy(handle)

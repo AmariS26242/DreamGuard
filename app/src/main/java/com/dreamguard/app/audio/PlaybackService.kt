@@ -93,6 +93,9 @@ class PlaybackService : MediaSessionService() {
 
     val localProcessingEnabled: Boolean get() = localProcessor.processingEnabled
 
+    val localLoudnessSnapshot: LocalAudioProcessor.LoudnessSnapshot
+        get() = localProcessor.loudnessSnapshot
+
     /**
      * Whether the switch can do something for the current file: the stage must be
      * reached, the format PCM16, and the native compressor must support the

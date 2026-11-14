@@ -13,6 +13,7 @@
  *
  * Everything is deterministic and allocation-free after create: the block store
  * is a fixed double array, so chunking the input cannot change any result.
+ * dg_lufs_window_snapshot() reads only the 30-hop window in O(1) time.
  */
 
 #include "dreamguard/lufs.h"
@@ -27,8 +28,8 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr int32_t kMaxChannels = 2;
-constexpr uint32_t kMomentaryHops = 4;   /* 400 ms */
-constexpr uint32_t kShortTermHops = 30;  /* 3 s */
+constexpr uint32_t kMomentaryHops = DG_LUFS_MOMENTARY_HOPS;   /* 400 ms */
+constexpr uint32_t kShortTermHops = DG_LUFS_SHORT_TERM_HOPS;  /* 3 s */
 
 constexpr double kNegativeInfinity = -std::numeric_limits<double>::infinity();
 
@@ -157,9 +158,8 @@ void clear_analysis(dg_lufs* lufs) {
     lufs->hop_energy = 0.0;
     lufs->hop_write = 0;
     lufs->hop_count = 0;
-    for (uint64_t i = 0; i < lufs->blocks_stored; ++i) {
-        lufs->blocks[i] = 0.0;
-    }
+    // Reset the logical extent. Old entries cannot be read until overwritten;
+    // do not scan up to one hour of history on a playback-thread boundary.
     lufs->block_count = 0;
     lufs->blocks_stored = 0;
     lufs->blocks_dropped = 0;
@@ -300,7 +300,8 @@ dg_status dg_lufs_process(dg_lufs* lufs, dg_pcm_view input) {
     return DG_OK;
 }
 
-dg_status dg_lufs_snapshot(const dg_lufs* lufs, dg_lufs_values* out_values) {
+dg_status dg_lufs_window_snapshot(const dg_lufs* lufs,
+                                  dg_lufs_window_values* out_values) {
     if (out_values == nullptr) {
         return DG_ERR_INVALID_ARGUMENT;
     }
@@ -308,18 +309,18 @@ dg_status dg_lufs_snapshot(const dg_lufs* lufs, dg_lufs_values* out_values) {
         return DG_ERR_NULL_HANDLE;
     }
 
-    dg_lufs_values values{};
+    dg_lufs_window_values values{};
     values.momentary_lufs = kNegativeInfinity;
     values.short_term_lufs = kNegativeInfinity;
-    values.integrated_lufs = kNegativeInfinity;
-    values.blocks = lufs->block_count;
-    values.blocks_dropped = lufs->blocks_dropped;
+    values.completed_hops = lufs->hop_count;
     values.non_finite_samples = lufs->non_finite_samples;
     values.hop_frames = lufs->hop_frames;
-    values.block_frames = lufs->block_frames;
+    values.momentary_frames = lufs->hop_frames * kMomentaryHops;
+    values.short_term_frames = lufs->hop_frames * kShortTermHops;
     values.pending_frames = lufs->hop_fill;
 
     if (lufs->hop_count >= kMomentaryHops) {
+        values.momentary_ready = 1;
         double sum = 0.0;
         for (uint32_t k = 0; k < kMomentaryHops; ++k) {
             sum += recent_hop(lufs, k);
@@ -329,6 +330,7 @@ dg_status dg_lufs_snapshot(const dg_lufs* lufs, dg_lufs_values* out_values) {
                                static_cast<double>(lufs->hop_frames)));
     }
     if (lufs->hop_count >= kShortTermHops) {
+        values.short_term_ready = 1;
         double sum = 0.0;
         for (uint32_t k = 0; k < kShortTermHops; ++k) {
             sum += recent_hop(lufs, k);
@@ -337,6 +339,35 @@ dg_status dg_lufs_snapshot(const dg_lufs* lufs, dg_lufs_values* out_values) {
             loudness_of(sum / (static_cast<double>(kShortTermHops) *
                                static_cast<double>(lufs->hop_frames)));
     }
+
+    *out_values = values;
+    return DG_OK;
+}
+
+dg_status dg_lufs_snapshot(const dg_lufs* lufs, dg_lufs_values* out_values) {
+    if (out_values == nullptr) {
+        return DG_ERR_INVALID_ARGUMENT;
+    }
+    if (lufs == nullptr) {
+        return DG_ERR_NULL_HANDLE;
+    }
+
+    dg_lufs_window_values window_values{};
+    const dg_status window_status = dg_lufs_window_snapshot(lufs, &window_values);
+    if (window_status != DG_OK) {
+        return window_status;
+    }
+
+    dg_lufs_values values{};
+    values.momentary_lufs = window_values.momentary_lufs;
+    values.short_term_lufs = window_values.short_term_lufs;
+    values.integrated_lufs = kNegativeInfinity;
+    values.blocks = lufs->block_count;
+    values.blocks_dropped = lufs->blocks_dropped;
+    values.non_finite_samples = window_values.non_finite_samples;
+    values.hop_frames = window_values.hop_frames;
+    values.block_frames = lufs->block_frames;
+    values.pending_frames = window_values.pending_frames;
 
     /* Absolute gate: keep blocks at or above -70 LUFS. */
     double absolute_sum = 0.0;

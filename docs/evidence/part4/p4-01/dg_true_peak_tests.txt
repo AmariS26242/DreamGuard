@@ -1,0 +1,14 @@
+﻿dg_true_peak tests (DG-014, 4x oversampled measurement only)
+PASS create validation
+PASS null handles and descriptor validation
+PASS silence and DC
+  fs/4 45deg: sample 0.707107 (-3.010 dBFS), true 1.000235 (0.002 dBFS), gap 3.012 dB
+PASS fs/4 45-degree analytic gap
+PASS Nyquist and impulse
+PASS non-finite input
+PASS mono and stereo
+PASS one-frame and odd chunks
+PASS reset
+PASS rate and channel smoke
+PASS dBFS helper
+  215 checks, 0 failures
