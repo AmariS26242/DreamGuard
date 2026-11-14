@@ -1,6 +1,6 @@
-Full JVM: 158/0/0.
-Debug and Release three-ABI builds: BUILD SUCCESSFUL.
-Final UI-only layout rebuild: BUILD SUCCESSFUL.
-app-debug.apk SHA256=0cfa849ebb08c91fd4f64d753f8c73f7159e3cf0640a02d6e34eb8d69cbbabd9
-app-release-unsigned.apk SHA256=807c634d417843e81bc4b49f1dd69c44bba2fcf818a0ac2a9e978be22c6c7d28
+Full JVM: 159/0/0.
+Debug and Release three-ABI builds after concurrency fix: BUILD SUCCESSFUL.
+Final installed APK: 100 real JNI cases and LUFS observation PASS.
+app-debug.apk SHA256=61d8e91803f6a5ebbb65a606880ba0857bf84cfb46565c150a7ef275aed18449
+app-release-unsigned.apk SHA256=3514e10682a21b176b2fb785f4a0f1d8dee949270cf346b977058de8407f56dd
 dg_dsp_bench SHA256=3a2623b1cea1f2cea3d8c40c6d61a1929b71aa5b13e628e889d70cc871dec041

@@ -251,6 +251,9 @@ class LocalAudioProcessor internal constructor(
     /** Latest bounded loudness & protection observation for UI display. */
     @Volatile
     var loudnessSnapshot: LoudnessSnapshot = LoudnessSnapshot()
+        // A playback-thread read already in flight may publish after the UI disables processing.
+        // Keep the visible state tied to the switch without touching native state on UI reads.
+        get() = if (processingEnabled) field else BYPASS_SNAPSHOT
         private set
 
     /** Whether the negotiated layout is one the compressor supports (1–2 ch). */
@@ -970,6 +973,7 @@ class LocalAudioProcessor internal constructor(
         /** Longest explanation the format note adds for the current state. */
         const val BYPASS_LABEL: String = "直通"
 
+        private val BYPASS_SNAPSHOT = LoudnessSnapshot()
         private const val MIN_NATIVE_CHANNELS = 1
         private const val MAX_NATIVE_CHANNELS = 2
         private const val LOOKAHEAD_FRAMES = 64

@@ -8,15 +8,16 @@
 
 - dg_lufs_window_snapshot 只读最近 4 / 30 hop，不扫描 integrated 历史。reset 通过逻辑范围清空分析，旧存储块覆盖前不可被读到。
 - 输入点在压缩及 −6.0206 dB 补偿后、限幅前；输出点在限幅后的湿声支路，包含 EOS drain 尾部。旁路不累计窗口，恢复处理重新积累；不清除压缩器音频历史。
-- nativeSnapshot 使用固定 16 字段数组。Kotlin 验证传输内容、按音频帧约 4 Hz 加边界发布不可变副本；读取异常显示暂不可用，不回退或中断正常音频。UI 不直接访问 native 句柄。
+- nativeSnapshot 使用固定 16 字段数组。Kotlin 验证传输内容、按音频帧约 4 Hz 加边界发布不可变副本；读取异常显示暂不可用，不回退或中断正常音频。UI 不直接访问 native 句柄，关闭开关后即使旧快照返回也只显示直通。
 - 界面区分未就绪、静音、低电平、直通与观测不可用，并明确支路读数不等于过渡混音或实际扬声器输出。
 
 ## 自动与界面验证
 
 | 项目 | 结果 | 记录 |
 | --- | --- | --- |
-| JVM（13 类） | 158 tests / 0 failures / 0 skipped；LocalAudioProcessor 37 项 | [summary](jvm-summary.txt) |
+| JVM（13 类） | 159 tests / 0 failures / 0 skipped；LocalAudioProcessor 38 项 | [summary](jvm-summary.txt) |
 | 新遥测异常反例 | 修前 2 项失败，修后通过 | [reproduction](reproduction.txt) |
+| 开关与快照并发反例 | 固定时序修前失败，修后通过 | [reproduction](toggle-reproduction.txt) |
 | 原生尾部与窗口断点反例 | 修前 4 个断言失败，修后通过 | [reproduction](native-reproduction.txt) |
 | LUFS | 302 checks / 0 failures | [log](dg_lufs_tests.txt) |
 | PCM16 | 1026 checks / 0 failures | [log](dg_pcm16_processor_tests.txt) |

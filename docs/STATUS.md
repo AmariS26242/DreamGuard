@@ -2,7 +2,7 @@
 
 更新日期 2026-11-14。第 36 轮完成 DG-014 保守 4× 峰值限制器及本地播放接入、DG-015 完整性能矩阵，状态为 DONE。原生/JVM、独立参考与模拟器短测通过；iQOO Z9T 真机听感和长测仍待补。见[本阶段证据](evidence/dg014-015-2026-11-12/README.md)。
 
-Part 4 已制定[执行计划](PART4_PLAN.md)。第 39/40 轮完成并审查 P4-01：有界 LUFS 查询、双观测点和界面；修正坏快照、故障节流、旁路窗口及 EOS 观测。158 项 JVM、九组原生回归（LUFS 302/0、PCM16 1026/0）、100 组真实 JNI 切换及观测通过，Debug/Release 三 ABI 构建和模拟器界面检查通过。360 项串行性能复测的 p95 低于块时长，早期超预算数据保留，不推断真机实时保证。详见[P4-01 审查及证据](evidence/part4/p4-01/REVIEW.md)。P4-01 为 DONE，不标 VERIFIED；P4-02～P4-05 及 DG-040/041/042/032 仍为 TODO。
+Part 4 已制定[执行计划](PART4_PLAN.md)。第 39/40 轮完成并审查 P4-01：有界 LUFS 查询、双观测点和界面；修正坏快照、故障节流、旁路窗口、EOS 观测及关闭开关的并发快照。159 项 JVM、九组原生回归（LUFS 302/0、PCM16 1026/0）、100 组真实 JNI 切换及观测通过，Debug/Release 三 ABI 构建和模拟器界面检查通过。360 项串行性能复测的 p95 低于块时长，早期超预算数据保留，不推断真机实时保证。详见[P4-01 审查及证据](evidence/part4/p4-01/REVIEW.md)。P4-01 为 DONE，不标 VERIFIED；P4-02～P4-05 及 DG-040/041/042/032 仍为 TODO。
 
 A1/A2 后续复核：保留工程防线与平滑切换改动，修正短冷启动淡出边界；152 项 JVM、九组原生回归、100 组真实 Kotlin/JNI/native 模拟器检查及 Debug/Release 三 ABI 构建通过。帧数与过渡峰值的保证范围见[审查报告](AUDIT_REPORT.md)。DG-040 仍为 TODO，真机听感待测。
 
@@ -57,7 +57,7 @@ A1/A2 后续复核：保留工程防线与平滑切换改动，修正短冷启�
 | DG-015 性能测试 | `DONE`（不标 VERIFIED） | 5 采样率 × 6 块长 × 2 布局 × 5 路径，300 行结果；时间、CPU、延迟、RSS/HWM、C++ 分配计数及复现脚本已归档。仅为 x86_64 模拟器数据。 | [原始 CSV 与环境](evidence/dg014-015-2026-11-12/README.md) |
 | DG-020 JNI Bridge | `DONE`（不标 VERIFIED） | 第 39 轮（P4-01）在原有 `nativeDrain` 等 6 个 PCM 符号基础上新增无堆分配 `nativeSnapshot`（16 字段，共 7 个 PCM JNI 符号；与 9 个声景符号隔离）。`NativePcmProcessorContractTest` 5 项全过、三 ABI Debug/Release 构建通过、模拟器 `AudioTransitionCheck` 真实 JNI 切换与响度观测通过。 | [第 36 轮证据](evidence/dg014-015-2026-11-12/README.md)；[P4-01 证据](evidence/part4/p4-01/) |
 | DG-021 Media3 播放器 | `IN_PROGRESS` | 第二十轮主代理在 Android API 35 x86_64 模拟器安装启动，系统选择器从 Downloads 选 40 s / 44.1 kHz / 单声道 PCM16 WAV；UI 显示文件名、`16-bit PCM · 44100 Hz · 1 ch`、播放中，`dumpsys media_session` 为 `PLAYING`；暂停显示已暂停、恢复后 `PLAYING`。第二十一轮已在 iQOO Z9T（V2352A / vivo / Android 16 API 36）真机安装同批 Debug APK（0.1.0 / versionCode 1 / SHA256 `3ABD75F1…F4C97D2`，pid 22780），用户用系统选择器播放 40 s / 44.1 kHz / 单声道 PCM16 WAV，对声音、−6 dB、暂停恢复、爆音卡顿**合并答复“正常”**；锁屏约 15 s 持续、播其他媒体后暂停。**第二十三轮只构建了 Debug APK，未安装/未运行**；**第二十四轮已安装启动当前 Debug APK，系统选择器选 40 s / 44.1 kHz / mono PCM16 WAV，UI 播放中、MediaSession `PLAYING`、进程存活、`AndroidRuntime:E` 无 FATAL/UnsatisfiedLinkError**；仍无音频输出/波形/听感、播放进度 UI、多格式/多路由/进程重建/30 分钟长稳，故不满足 `DONE` | 第二十轮模拟器记录；**第二十一轮 iQOO Z9T 用户操作记录**（“正常”为合并答复，对应旧 Kotlin −6 dB 链路）；**第二十四轮模拟器播放状态证据（非音频输出）** |
-| DG-022 AudioProcessor | `IN_PROGRESS` | P4-01 双观测点、快照传输和约 4 Hz 发布已审查；158 项 JVM、PCM16 1026/0、100 组真实 JNI 切换及观测通过。EOS 包含尾部，恢复处理重新积累窗口；真机听感仍待补，自动响度尚未实施。 | [P4-01 复核](evidence/part4/p4-01/REVIEW.md) |
+| DG-022 AudioProcessor | `IN_PROGRESS` | P4-01 双观测点、快照传输和约 4 Hz 发布已审查；159 项 JVM、PCM16 1026/0、100 组真实 JNI 切换及观测通过。EOS 包含尾部，恢复处理重新积累窗口；真机听感仍待补，自动响度尚未实施。 | [P4-01 复核](evidence/part4/p4-01/REVIEW.md) |
 | DG-023 Android 基础 UI | `IN_PROGRESS` | 响度观测面板已接入并检查模拟器截图；错误显示暂不可用，暂停后关闭处理显示直通。处理支路标识、说明换行和开关布局已修正。真机、预设和进度等完整验收仍待补。 | [截图与证据](evidence/part4/p4-01/README.md) |
 | DG-024 第三方媒体音量控制原型 | `IN_PROGRESS` | Debug 构建、92 项 JVM 测试及模拟器基础读写通过。iQOO Z9T + 哔哩哔哩 9.18.0 + 蓝牙 A2DP 短测确认滑块调节 6/15 → 3/15，音量键调节后系统为 4/15、页面为 27%。边界、固定输出及更多组合待测。 | [第 27 轮开发日志](DEVLOG.md) |
 | DG-025 睡眠定时与渐弱控制 | `IN_PROGRESS` | Debug 构建和 137 项 JVM 测试通过。API 35 模拟器已验证渐弱、AOSP 播放器共存、取消、手动调节、短时锁屏及强停重开。iQOO Z9T 与哔哩哔哩短测待补。 | [第 30 轮开发日志](DEVLOG.md) |

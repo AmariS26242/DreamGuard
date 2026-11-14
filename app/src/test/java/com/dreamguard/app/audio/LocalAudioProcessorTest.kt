@@ -104,6 +104,8 @@ class LocalAudioProcessorTest {
         var requireDirectInput = false
         var snapshotCalls = 0
         var failSnapshot = false
+        var snapshotEntered: java.util.concurrent.CountDownLatch? = null
+        var snapshotGate: java.util.concurrent.CountDownLatch? = null
         var nextSnapshot: DoubleArray? = null
         var lastHandle = 0L
         var lastInputLength = 0
@@ -163,6 +165,8 @@ class LocalAudioProcessorTest {
 
         override fun snapshot(handle: Long, outValues: DoubleArray): Int {
             snapshotCalls++
+            snapshotEntered?.countDown()
+            snapshotGate?.await()
             if (failSnapshot) return NativePcmProcessor.ERROR_DSP
             val custom = nextSnapshot
             if (custom != null) {
@@ -1250,6 +1254,37 @@ class LocalAudioProcessorTest {
                     -slope * (x * x) / (2.0 * knee)
                 }
             }
+        }
+    }
+
+    @Test
+    fun `disabling during an in-flight snapshot cannot resurrect active UI readings`() {
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val resume = java.util.concurrent.CountDownLatch(1)
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+        val fake = FakeCompressor().apply { snapshotEntered = entered; snapshotGate = resume }
+        val processor = LocalAudioProcessor(fake)
+        processor.setProcessingEnabled(true)
+        val worker = Thread {
+            try {
+                configured(processor)
+                processor.queueInput(samples(*ShortArray(960 * 2) { 1000 }))
+                processor.output
+            } catch (error: Throwable) { failure.set(error) }
+        }
+        worker.start()
+        try {
+            assertTrue(entered.await(2, java.util.concurrent.TimeUnit.SECONDS))
+            processor.setProcessingEnabled(false)
+            resume.countDown()
+            worker.join(2000)
+            assertFalse(worker.isAlive)
+            assertNull(failure.get())
+            assertEquals(LocalAudioProcessor.ObservationState.BYPASS, processor.loudnessSnapshot.state)
+        } finally {
+            resume.countDown()
+            worker.join(2000)
+            processor.close()
         }
     }
 
